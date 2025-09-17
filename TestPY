@@ -1,0 +1,47 @@
+# Code for loading data from raw schema to ods schema for entity tb table
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/tb_validations"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_validations"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("va", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("va"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
