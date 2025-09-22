@@ -1,0 +1,50 @@
+import msoffcrypto
+import io
+import pandas as pd
+import os
+
+# Path to the encrypted Excel file
+encrypted_file_path = "C:\Python\ADQ\Output_MS1_New_For Dev_Test.xlsx"
+decrypted_file_path = "C:\Python\ADQ\Output.xlsx"  # Optional output path
+password = "enec-25"
+
+# Function to check if file is encrypted and remove protection
+def load_excel_handling_encryption(file_path, password, save_decrypted=False, decrypted_path=None):
+    with open(file_path, "rb") as f:
+        # Check if the file is encrypted
+        office_file = msoffcrypto.OfficeFile(f)
+        if office_file.is_encrypted():
+            print("File is password protected. Decrypting...")
+
+            # Load password
+            office_file.load_key(password=password)
+
+            # Decrypt in memory
+            decrypted = io.BytesIO()
+            office_file.decrypt(decrypted)
+            decrypted.seek(0)
+
+            # Optionally save the decrypted file to disk
+            if save_decrypted and decrypted_path:
+                with open(decrypted_path, "wb") as out_file:
+                    out_file.write(decrypted.getbuffer())
+                print(f"Decrypted file saved to: {decrypted_path}")
+
+            # Read into pandas
+            df = pd.read_excel(decrypted, engine="openpyxl")
+        else:
+            print("File is not password protected.")
+            df = pd.read_excel(file_path, engine="openpyxl")
+
+    return df
+
+# Load the Excel file and handle password protection
+df = load_excel_handling_encryption(
+    file_path=encrypted_file_path,
+    password=password,
+    save_decrypted=True,  # Set to False if you don't want to save the unprotected version
+    decrypted_path=decrypted_file_path
+)
+
+# Show the dataframe
+print(df)
