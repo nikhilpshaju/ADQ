@@ -8,16 +8,17 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.cell.cell import MergedCell
 from copy import copy
 
-# === Step 1: Break External Links Using win32com ===
+
+# === Step 1: Set variables
 input_file = "/lakehouse/default/Files/adq-container/ADQ_Smartview based Package_Review Reports_PROD_15.xlsx"
 output_file = "./builtin/Out.xlsx"
- 
+
 if not os.path.exists(input_file):
     print(f"File not found: {input_file}")
     exit()
-    
-print("Processing........")
  
+print("Processing........")
+
 # === Step 2: Process output file using openpyxl ===
 workbook = load_workbook(input_file, data_only=True)
 print("Loading workbook.......")
@@ -52,7 +53,7 @@ if "Index" in workbook.sheetnames:
                 sheet.cell(row=row, column=col).value = value
 else:
     print("Sheet 'Index' not found.")
- 
+
 # --- Process all sheets for hyperlinks, N/A, etc. ---
 for sheetname in workbook.sheetnames:
     ws = workbook[sheetname]
@@ -68,7 +69,7 @@ for sheetname in workbook.sheetnames:
             ws.cell(row=5, column=new_col).value = f"{header} - Location"
             ws.cell(row=5, column=new_col + 1).value = f"{header} - Text"
             new_col += 2
- 
+
     for row in range(2, ws.max_row + 1):
         for col, loc_col in col_index_map.items():
             cell = ws.cell(row=row, column=col)
@@ -623,11 +624,30 @@ for row in range(2, col_ref_sheet.max_row + 1):
             if search_str in final_header_lower:
                 col_ref_sheet.cell(row=row, column=4).value = new_value
                 break
+            
 col_ref_sheet.delete_cols(6)
-col_ref_sheet.cell(row=136, column=2, value="TB_Validated_Status")
-col_ref_sheet.cell(row=136, column=3, value=value_to_copy)
+# Set headers
+col_ref_sheet.cell(row=1, column=6, value="tb_validated_status")
+col_ref_sheet.cell(row=1, column=7, value="tb_amount")
  
+# Fill rows 2 to 135 with defaults
+for row in range(2, 136):
+    col_ref_sheet.cell(row=row, column=6, value="NotRequired")
+    col_ref_sheet.cell(row=row, column=7, value=0)
  
+# Place the actual values in row 136
+value_to_copy = workbook["Entity TB"]["B2"].value
+value_from_entity_tb = workbook["Entity TB"]["D2"].value
+ 
+
+col_ref_sheet.cell(row=136, column=2, value="Others")
+col_ref_sheet.cell(row=136, column=3, value="tb_validated_status")
+col_ref_sheet.cell(row=136, column=5, value=str(3))
+
+col_ref_sheet.cell(row=136, column=6, value=value_to_copy)
+col_ref_sheet.cell(row=136, column=7, value=value_from_entity_tb)
+
+
 # --- Final step: Clean up GN-17.3_NEW ---
 if "GN-17.3_NEW" in final_wb.sheetnames:
     ws_gn173 = final_wb["GN-17.3_NEW"]
@@ -657,7 +677,7 @@ if "GN-17.3_NEW" in final_wb.sheetnames:
         if val:
             ws_gn173.cell(row=1, column=col, value=f"{val}_Prior_Period_Actual")
  
-    # 4️ Preprocess headers (remove ".", spaces, fix hyphens → underscores)
+    # 4ï¸ Preprocess headers (remove ".", spaces, fix hyphens â†’ underscores)
     RESERVED = {"class", "def", "return"}
  
     def clean_header(val):
@@ -683,8 +703,7 @@ if "GN-17.3_NEW" in final_wb.sheetnames:
         if val:
             ws_gn173.cell(row=1, column=col, value=clean_header(val))
  
- 
- 
+
 col_ref_ws = final_wb["Column_Reference"]
 
 for row in range(2, col_ref_ws.max_row + 1):
@@ -708,19 +727,45 @@ for row in range(2, col_ref_ws.max_row + 1):
     headers_in_sheet = [_clean_token(ws.cell(row=1, column=col).value)
                         for col in range(1, ws.max_column + 1) if ws.cell(row=1, column=col).value]
 
-    # Normalize the header we’re checking too
+    # Normalize the header weâ€™re checking too
     norm_header_to_check = _clean_token(header_to_check)
 
     if norm_header_to_check not in headers_in_sheet:
         print(f"Row {row}: Header '{header_to_check}' not found in sheet '{ws.title}'. NOT FOUND")
         exit(1)
 
+#  Step: Remove rows with empty cells under FSLI in *_NEW sheets ---
+for ws_name in final_wb.sheetnames:
+    if not ws_name.lower().endswith("_new"):
+        continue  # skip non-_NEW sheets
+
+    ws = final_wb[ws_name]
+
+    # Find all columns in row 1 containing 'fsli' 
+    fsli_cols = [col for col in range(1, ws.max_column + 1)
+                 if ws.cell(row=1, column=col).value and 'fsli' in str(ws.cell(row=1, column=col).value).lower()]
+
+    if not fsli_cols:
+        continue  # skip sheet if no 'fsli' in header
+
+    # Collect rows to delete
+    rows_to_delete = set()
+    for col in fsli_cols:
+        for row in range(2, ws.max_row + 1):
+            cell_val = ws.cell(row=row, column=col).value
+            if cell_val is None or str(cell_val).strip() == "":
+                rows_to_delete.add(row)
+
+    # Delete rows in reverse order to avoid shifting issues
+    for row in sorted(rows_to_delete, reverse=True):
+        ws.delete_rows(row)
+
+
+col_ref_sheet.cell(row=136, column=1, value="Others")
+col_ref_sheet.cell(row=136, column=4, value="Others")
 # If loop completes without exiting
 print("Validated successfully")
 
 # --- Save workbook ---
 final_wb.save(output_file)
 print(f" Saved as: {output_file}")
- 
-
- 
