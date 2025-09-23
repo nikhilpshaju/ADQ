@@ -1,0 +1,244 @@
+from office365.sharepoint.client_context import ClientContext
+from office365.runtime.auth.user_credential import UserCredential
+
+import os
+import re
+import time
+import msal
+import requests
+import jwt
+#from config import *
+import pandas as pd
+#from wordtoPDF import word_to_pdf
+from datetime import datetime
+
+base_dir=os.getcwd()
+print(base_dir)
+print("Process Started:")
+
+class Sharepoint_DocumentRepo:
+    
+    # Initialize with SharePoint and Azure AD credentials
+    def __init__(self, TenantId, ClientId, ClientSecret, SiteDomain, SiteName, document_library):
+        self.TenantId = TenantId
+        self.ClientId = ClientId
+        self.ClientSecret = ClientSecret
+        self.SiteDomain = SiteDomain
+        self.SiteName = SiteName
+        self.document_library = document_library
+        self.token_url = f"https://login.microsoftonline.com/{TenantId}/oauth2/v2.0/token"
+        self.graph_api_url = "https://graph.microsoft.com/v1.0"
+        self.access_token = self.get_access_token()
+        self.headers = {"Authorization": f"Bearer {self.access_token}"}
+        self.site_id = self.get_site_id()
+        self.drive_id = self.get_drive_id()  
+        
+        print("acquire_tok:")
+
+    # Get access token for SharePoint
+    def get_access_token(self):
+        """Generates and returns the access token for the app using GraphAPI and the SharePoint credentials"""
+
+        app = msal.ConfidentialClientApplication(
+            self.ClientId,
+            authority=f"https://login.microsoftonline.com/{self.TenantId}",
+            client_credential=self.ClientSecret
+        )
+        result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+
+       # print("acquire_tok:", result.get("access_token"))
+        
+        if "access_token" in result:
+            return result["access_token"]
+        else:
+            raise Exception("Token acquisition failed", result)    
+
+    # Get site ID for SharePoint
+    def get_site_id(self):
+        """Returns the site ID for the given SharePoint site"""
+
+        url = f"{self.graph_api_url}/sites/{self.SiteDomain}:/sites/{self.SiteName}"
+        #print("site URL:", url)
+        response = requests.get(url, headers=self.headers)
+        if response.status_code == 200:
+            return response.json().get("id")
+        else:
+            print("Failed to retrieve site ID:", response.text)
+            raise Exception("Failed to retrieve site ID", response.text)
+
+    # Get drive ID for SharePoint document library
+    def get_drive_id(self):
+        """Returns the drive ID for the SharePoint folder, default folder is the Shared Documents"""
+        
+        url = f"{self.graph_api_url}/sites/{self.site_id}/drives"
+        #print("drive URL:", url)
+        response = requests.get(url, headers=self.headers)
+
+        if response.status_code == 200:
+            drives = response.json().get("value", [])
+            
+            for drive in drives:
+                if drive.get("name").lower() == self.document_library.lower():
+                    return drive["id"]
+            raise Exception(f"Drive '{self.document_library}' not found")
+        
+        else:
+            raise Exception("Failed to get drive ID", response.text)
+
+# Get current working directory contents   
+    def current_working_directory(self,folder_path):
+        """Get the current working directory"""
+        self._ensure_valid_token()
+         
+        folder_url = f"{self.graph_api_url}/drives/{self.drive_id}/root/children"
+                    
+        response = requests.get(folder_url, headers=self.headers)
+                
+        if response.status_code != 200:
+            raise Exception(f"Failed to get folder contents: {response.status_code} - {response.text}")
+                
+        folder_contents = response.json().get("value", [])
+        
+        selected_item = next((item for item in folder_contents if item.get("name") == folder_path), None)
+        selected_item_id = selected_item.get("id") if selected_item else None
+        children_url = f"{self.graph_api_url}/drives/{self.drive_id}/items/{selected_item_id}/children"
+        children_response = requests.get(children_url, headers=self.headers)
+        if children_response.status_code != 200:
+            raise Exception(f"Failed to get folder contents: { children_response.status_code} - { children_response.text}")
+           
+        children_contents = children_response.json().get("value", [])
+
+        return children_contents
+
+  # Ensure the access token is valid, refresh if needed
+    def _ensure_valid_token(self):
+        """Ensure token is valid, refresh if needed"""
+
+        try:
+            decoded = jwt.decode(self.access_token, options={"verify_signature": False})
+            exp_timestamp = decoded.get("exp", 0)
+            current_timestamp = int(time.time())
+            
+            # If token is expired or will expire in the next 5 minutes
+            if current_timestamp >= (exp_timestamp - 300):
+                self.access_token = self.get_access_token()
+                self.headers = {"Authorization": f"Bearer {self.access_token}"}
+        except Exception as e:
+            print(f"Error refreshing token: {str(e)}")
+            self.access_token = self.get_access_token()
+            self.headers = {"Authorization": f"Bearer {self.access_token}"}
+   
+    # List folders in the document library
+    def list_folders_in_document_library(self):
+        """Lists all folders in the root of the specified document library."""
+        url = f"{self.graph_api_url}/drives/{self.drive_id}/root/children"
+        print("site folders URL:", url)
+        response = requests.get(url, headers=self.headers)
+        if response.status_code == 200:
+            items = response.json().get("value", [])
+          
+            print("Total Folders:", len(items))
+            folders = [item for item in items if item.get("folder")]
+            for folder in folders:
+                print("Folder Name:", folder["name"])
+            return folders
+        else:
+            print("Failed to retrieve folders:", response.text)
+            return []
+
+
+
+    # List folders inside a specific folder in the document library
+    def list_folders_in_subfolder(self, parent_folder_id):
+        """Lists all folders inside a specific folder in the document library."""
+        url = f"{self.graph_api_url}/drives/{self.drive_id}/items/{parent_folder_id}/children"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code == 200:
+            items = response.json().get("value", [])
+            folders = [item for item in items if item.get("folder")]
+            for folder in folders:
+                print("Folder Name:", folder["name"])
+            return folders
+        else:
+            print("Failed to retrieve folders:", response.text)
+            return []
+
+#FOLDER_PATH = "/Testing/GRPs_and_Portfolio_Co_Stat_FS_2025/Samples/Automation_Input"
+
+    def list_files_in_subfolder(self, folder_path):
+            """Lists all files inside a specific folder in the document library."""
+            self._ensure_valid_token()
+
+            url = f"{self.graph_api_url}/drives/{self.drive_id}/root:/{folder_path}:/children"
+            print("Files URL:", url)
+            response = requests.get(url, headers=self.headers)
+            if response.status_code == 200:
+                items = response.json().get("value", [])
+                for item in items:
+                    if "folder" in item:
+                        print(f"📁 {item['name']} (Folder)")
+                    else:
+                        #print(f"📄 {item['name']} (Download URL: {item['@microsoft.graph.downloadUrl']})")
+                        print(f"📄 {item['name']} (File)")
+                return items
+            else:
+                print(f"Failed to retrieve folder contents: {response.status_code} - {response.text}")
+                return []
+    def move_file_to_folder(self, file_id, dest_folder_path):
+        """Moves a file to a new SharePoint folder using Microsoft Graph API."""
+        self._ensure_valid_token()
+        # Get destination folder's item id
+        dest_url = f"{self.graph_api_url}/drives/{self.drive_id}/root:/{dest_folder_path}"
+        dest_response = requests.get(dest_url, headers=self.headers)
+        if dest_response.status_code == 200:
+            dest_folder_id = dest_response.json().get("id")
+        else:
+            print(f"Failed to get destination folder id: {dest_response.status_code} - {dest_response.text}")
+            return False
+
+        # Move file by updating its parentReference
+        move_url = f"{self.graph_api_url}/drives/{self.drive_id}/items/{file_id}"
+        move_body = {"parentReference": {"id": dest_folder_id}}
+        move_response = requests.patch(move_url, headers={**self.headers, "Content-Type": "application/json"}, json=move_body)
+        if move_response.status_code in (200, 201):
+            print(f"Moved file {file_id} to {dest_folder_path}")
+            return True
+        else:
+            print(f"Failed to move file: {move_response.status_code} - {move_response.text}")
+            return False
+        
+    def validations(self, file_list, dest_folder_path=None):
+        """If .xlsx file, print and optionally move to new SharePoint folder."""
+        for file in file_list:
+            if "folder" not in file and file["name"].lower().endswith(".xlsx"):
+                print('excel :' + file["name"], file["id"])
+                if dest_folder_path:
+                    self.move_file_to_folder(file["id"], dest_folder_path)
+    
+    # ...existing code...
+
+
+
+repo = Sharepoint_DocumentRepo(
+    TenantId='',
+    ClientId='',
+    ClientSecret='',
+    SiteDomain='sites.ey.com',
+    SiteName='UniversalBot_DEV',
+    document_library='Testing'
+)
+#folders = repo.list_folders_in_document_library()
+#print("Folders list':", [f["name"] for f in folders])
+
+#root_folders = repo.list_folders_in_document_library()
+
+# Source and destination folder paths
+FOLDER_PATH = "GRPs_and_Portfolio_Co_Stat_FS_2025/Samples/Automation_Input"
+DEST_FOLDER_PATH = "GRPs_and_Portfolio_Co_Stat_FS_2025/Samples/Automation_output"  # Change as needed
+fileList = repo.list_files_in_subfolder(FOLDER_PATH)
+repo.validations(fileList, dest_folder_path=DEST_FOLDER_PATH)
+
+#for file in fileList:
+#    print(file["name"], file["id"])
+
+print("Process ended:")
