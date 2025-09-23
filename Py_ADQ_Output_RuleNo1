@@ -1,0 +1,240 @@
+!pip install pandas openpyxl
+!pip install deltalake pandas
+
+#All imports
+
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from openpyxl import load_workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+
+#Output Function for Rule No 1 - Index
+
+#initialize variables
+txnID = 'MS1_1000001'
+sheetname = 'index'
+excel_path = "/lakehouse/default/Files/Input/ADQ_Smartview_Linkbroken.xlsx"
+dest_path = "./builtin/Outlinkbroken.xlsx"
+sheet_name = "Output - Rule 1"
+abfs_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7"
+
+
+
+# Initialize Spark session
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+# Define source and target paths
+finaltable_path = abfs_path+ "/Tables/final_index"
+odstable_path = abfs_path+"/Tables/ods_index"
+
+#Create join to get details corresponding to the current file
+
+final_df = spark.read.format("delta").load(finaltable_path).createOrReplaceTempView("final_view")
+ods_df = spark.read.format("delta").load(odstable_path).createOrReplaceTempView("ods_view")
+
+df = spark.sql("""
+    SELECT fi.srno, fi.noteno, fi.notename,fi.currentperiod,fi.priorperiod,fi.row_no
+    FROM final_view fi
+    INNER JOIN ods_view od
+        ON fi.id = od.id
+    WHERE od.txnID = txnID
+""")
+
+df.show()
+
+#Perform steps only if there are fail transactions
+
+if df.count()> 0: 
+
+        #Write to excel file
+        pandas_df = df.toPandas()
+
+        # Load the existing workbook
+        wb = load_workbook(excel_path)
+        if sheet_name in wb.sheetnames:
+                 print(f"Sheet '{sheet_name}' already exists.")
+        else:
+                new_sheet = wb.create_sheet(title=sheet_name, index=1)
+        ws = wb[sheet_name]
+
+        # Find the last row with content
+        last_row = ws.max_row
+        # Set headers
+
+        ws.cell(row=last_row + 1 , column= 2).value = "List of failed validations in Index sheet"
+        ws.cell(row=last_row + 2 , column= 2).value = "Sr.No"
+        ws.cell(row=last_row + 2 , column= 3).value = "Note No."
+        ws.cell(row=last_row + 2 , column= 4).value = "Note Name"
+        ws.cell(row=last_row + 2 , column= 5).value = "Current Period"
+        ws.cell(row=last_row + 2 , column= 6).value = "Prior Period"       
+        ws.cell(row=last_row + 2 , column= 7).value = "Row Number"
+
+        # Optional: Print last row for debug
+        print(f"Last row with content: {last_row}")
+
+        # Start appending below last row (no header this time)
+        for r_idx, row in enumerate(dataframe_to_rows(pandas_df, index=False, header=False), start=last_row + 3):
+                for c_idx, value in enumerate(row, start=2):
+                        ws.cell(row=r_idx, column=c_idx, value=value)
+
+        # Save back the workbook
+        wb.save(dest_path)
+
+
+
+
+
+
+#Output Function for Rule No 1 - Validations
+
+#initialize variables
+txnID = 'MS1_1000001'
+sheetname = 'index'
+excel_path = "./builtin/Outlinkbroken.xlsx"
+dest_path = "./builtin/Outlinkbroken.xlsx"
+sheet_name = "Output - Rule 1"
+abfs_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7"
+
+
+
+# Initialize Spark session
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+# Define source and target paths
+finaltable_path = abfs_path+ "/Tables/final_validations"
+odstable_path = abfs_path+"/Tables/ods_validations"
+
+#Create join to get details corresponding to the current file
+
+final_df = spark.read.format("delta").load(finaltable_path).createOrReplaceTempView("final_view")
+ods_df = spark.read.format("delta").load(odstable_path).createOrReplaceTempView("ods_view")
+
+df = spark.sql("""
+    SELECT ROW_NUMBER() OVER (ORDER BY fi.row_no) AS row_num, fi.note_no, fi.fsli,fi.current_validation,fi.prior_validation,fi.row_no
+    FROM final_view fi
+    INNER JOIN ods_view od
+        ON fi.id = od.id
+    WHERE od.txnID = txnID
+""")
+
+df.show()
+
+#Perform steps only if there are fail transactions
+
+if df.count()> 0: 
+
+        #Write to excel file
+        pandas_df = df.toPandas()
+
+        # Load the existing workbook
+        wb = load_workbook(excel_path)
+        if sheet_name in wb.sheetnames:
+                 print(f"Sheet '{sheet_name}' already exists.")
+        else:
+                new_sheet = wb.create_sheet(title=sheet_name, index=1)
+        ws = wb[sheet_name]
+
+        # Find the last row with content
+        last_row = ws.max_row
+        # Set headers
+        if last_row > 0:
+            last_row = last_row + 1
+
+        ws.cell(row=last_row + 1 , column= 2).value = "List of failed validations in Validations sheet"
+        ws.cell(row=last_row + 2 , column= 2).value = "Sr.No"
+        ws.cell(row=last_row + 2 , column= 3).value = "Note No."
+        ws.cell(row=last_row + 2 , column= 4).value = "Note Name"
+        ws.cell(row=last_row + 2 , column= 5).value = "Current Period"
+        ws.cell(row=last_row + 2 , column= 6).value = "Prior Period"       
+        ws.cell(row=last_row + 2 , column= 7).value = "Row Number"
+
+        # Optional: Print last row for debug
+        print(f"Last row with content: {last_row}")
+
+        # Start appending below last row (no header this time)
+        for r_idx, row in enumerate(dataframe_to_rows(pandas_df, index=False, header=False), start=last_row + 3):
+                for c_idx, value in enumerate(row, start=2):
+                        ws.cell(row=r_idx, column=c_idx, value=value)
+
+        # Save back the workbook
+        wb.save(dest_path)
+
+
+
+
+
+#Output Function for Rule No 1 - Entity TB
+
+#initialize variables
+txnID = 'MS1_1000001'
+sheetname = 'Entity TB'
+excel_path = "./builtin/Outlinkbroken.xlsx"
+dest_path = "./builtin/Outlinkbroken.xlsx"
+sheet_name = "Output - Rule 1"
+abfs_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7"
+
+# Initialize Spark session
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+# Define source and target paths
+source_path = abfs_path+ "/Tables/raw_column_reference"
+
+#Create join to get details corresponding to the current file
+
+source_df = spark.read.format("delta").load(source_path).createOrReplaceTempView("vw_column_reference")
+df = spark.sql("SELECT 1 AS srno, '' AS Note, 'TB Status' AS notename, tb_validated_status, tb_amount,  2 AS sheetrow FROM vw_column_reference WHERE where original_header = 'tb_validated_status'")
+df.show()
+
+if df.count()> 0: 
+
+        #Write to excel file
+        pandas_df = df.toPandas()
+
+        # Load the existing workbook
+        wb = load_workbook(excel_path)
+        if sheet_name in wb.sheetnames:
+                 print(f"Sheet '{sheet_name}' already exists.")
+        else:
+                new_sheet = wb.create_sheet(title=sheet_name, index=1)
+        ws = wb[sheet_name]
+
+        # Find the last row with content
+        last_row = ws.max_row
+        # Set headers
+        if last_row > 0:
+            last_row = last_row + 1
+
+        ws.cell(row=last_row + 1 , column= 2).value = "List of failed validations in Entity TB sheet"
+        ws.cell(row=last_row + 2 , column= 2).value = "Sr.No"
+        ws.cell(row=last_row + 2 , column= 3).value = ""
+        ws.cell(row=last_row + 2 , column= 4).value = "Note Name"
+        ws.cell(row=last_row + 2 , column= 5).value = "Validation Status"
+        ws.cell(row=last_row + 2 , column= 6).value = "TB Value"       
+        ws.cell(row=last_row + 2 , column= 7).value = "Row Number"
+
+        # Optional: Print last row for debug
+        print(f"Last row with content: {last_row}")
+
+        # Start appending below last row (no header this time)
+        for r_idx, row in enumerate(dataframe_to_rows(pandas_df, index=False, header=False), start=last_row + 3):
+                for c_idx, value in enumerate(row, start=2):
+                        ws.cell(row=r_idx, column=c_idx, value=value)
+
+        # Save back the workbook
+        wb.save(dest_path)
+
+else:
+    print("TB Validation status not found in database")
+
