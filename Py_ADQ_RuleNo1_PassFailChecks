@@ -1,0 +1,104 @@
+!pip install pandas openpyxl
+!pip install deltalake pandas
+
+
+
+#Pass/Fail checks for index - V2
+
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+
+#initialize variables
+txnID = 'MS1_1000001'
+sheetname = 'index'
+
+
+# Initialize Spark session
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_index"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/final_index"  # New table path
+
+# Step 3: Read data from ods table based on condition - current period or prior period is 'FAIL'
+df = spark.read.format("delta").load(source_path).createOrReplaceTempView("vw_index")
+
+selected_df = spark.sql("SELECT id, srno, noteno, notename,currentperiod,priorperiod,row_no FROM vw_index WHERE (currentperiod = 'FAIL' OR priorperiod = 'FAIL') AND txnID = txnID")
+selected_df.show()
+
+#Step 4: Write filtered data to a new Delta table
+selected_df.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+#Pass/Fail checks for validations V2
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+
+#initialize variables
+txnID = 'MS1_1000001'
+sheetname = 'validations'
+
+# Initialize Spark session
+spark = SparkSession.builder \
+        .appName("ADQLHDevStaging01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_validations"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/final_validations"  # New table path
+
+# Step 3: Read data from ods table based on condition - current period or prior period is 'FAIL'
+df = spark.read.format("delta").load(source_path).createOrReplaceTempView("vw_validations")
+selected_df = spark.sql("SELECT id, note_no, fsli, current_validation, prior_validation, description, row_no FROM vw_validations WHERE (current_validation = 'FAIL' OR prior_validation = 'FAIL') AND txnID = txnID")
+#selected_df.show()
+
+#Step 4: Write filtered data to a new Delta table
+selected_df.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+#Pass/Fail checks for entity TB
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+
+#initialize variables
+#txnID = 'MS1_1000001'
+#sheetname = 'validations'
+
+# Initialize Spark session
+spark = SparkSession.builder \
+        .appName("ADQLHDevStaging01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_column_reference"  # Update path
+#target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/final_validations"  # New table path
+
+# Step 3: Read data from ods table based on condition - current period or prior period is 'FAIL'
+df = spark.read.format("delta").load(source_path).createOrReplaceTempView("vw_column_reference")
+selected_df = spark.sql("SELECT * FROM vw_column_reference WHERE where original_header = 'tb_validated_status'")
+selected_df.show()
+if (selected_df.count())>0:
+        rows = selected_df.collect()
+        print(rows[0]['tb_validated_status'])
+else:
+        print("TB validation status not found")
+
