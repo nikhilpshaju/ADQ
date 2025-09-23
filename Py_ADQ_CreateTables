@@ -1,0 +1,595 @@
+!pip install pandas openpyxl
+!pip install deltalake pandas
+
+#In Progress - Code for loading data from excel to tables
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+
+# Path to Excel file in Lakehouse Files
+excel_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/Input/Columnreference_updated.xlsx"
+# display(excel_path)
+
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("ExcelToDeltaWithMetastore") \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+    .enableHiveSupport() \
+.getOrCreate()
+
+# Read all sheets
+tabs = pd.read_excel(excel_path, sheet_name=None, engine='openpyxl')
+# display(tabs)
+
+for tabname, df in tabs.items():
+    print(f"\n🔄 Processing sheet: {tabname}")
+    display(df)
+    
+
+    # Validate headers
+    if df.columns.isnull().any():
+        print(f"❌ Skipping '{tabname}': Missing column headers.")
+        continue
+
+    # Validate and clean unsupported data types
+    for col in df.columns:
+        if df[col].dtype not in ['int64', 'float64', 'bool', 'datetime64[ns]', 'object']:
+            print(f"⚠️ Column '{col}' in '{tabname}' has unsupported type '{df[col].dtype}'. Converting to string.")
+            df[col] = df[col].astype(str)
+
+    
+
+    # Try converting to Spark DataFrame
+    try:
+        sdf = spark.createDataFrame(df)
+        sdf.printSchema()
+    except Exception as e:
+        print(f"❌ Error converting '{tabname}' to Spark DataFrame: {e}")
+        continue
+
+
+    # Clean sheet name for table naming
+    tablename = "raw_column_reference"
+    tabtable = "/lakehouse/default/Tables/"+tablename
+    display(tabtable)
+
+
+    # Try writing to Lakehouse
+    try:
+        sdf.write.mode("overwrite").format("delta").saveAsTable(tablename)
+
+        #New code
+        spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {tablename}
+        USING DELTA
+        LOCATION '{tabtable}'
+        """)
+        #New code end
+        print(f"✅ Created table: {tablename}")
+    except Exception as e:
+        print(f"❌ Error writing table '{tablename}': {e}")
+
+
+
+
+
+# Code for loading data from raw schema to ods schema for index table
+
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+#Hardcoder transaction ID
+
+txnID = "MS1_1000001"
+#Step 1 Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/tb_index"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_index"  # New table path
+
+#Step 3: Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("in", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+existing_df = spark.read.format("delta").load(source_path)
+#Step 4: Add row number and generate alphanumeric ID
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    #F.concat(F.lit("in"), F.format_string("", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("in"), (F.col("row_num") + F.lit(max_id_num)))
+    F.concat(F.lit("in"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+# Code for loading data from raw schema to ods schema for validations table
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/tb_validations"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_validations"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("va", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("va"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+
+
+# Code for loading data from raw schema to ods schema for entity tb table
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_entity_tb"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_entity_tb"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("en", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("en"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+
+
+# Code for loading data from raw schema to ods schema for sofpcommentary table
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_sofp_commentary"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_sofp_commentary"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("sf", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("sf"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+
+# Code for loading data from raw schema to ods schema for soplcommentary table
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_sopl_commentary"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_sopl_commentary"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("sp", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("sp"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+# Code for loading data from raw schema to ods schema for socie
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000003"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_socie"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_socie"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("sc", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("sc"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+
+# Code for loading data from raw schema to ods schema for cfreview form
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_cf_review_form"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_cf_review_form"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("cf", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("cf"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+# Code for loading data from raw schema to ods schema for gn17.3
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_gn_17_3"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_gn_17_3"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("g173", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("g173"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+# Code for loading data from raw schema to ods schema for gn18.1.1
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_gn_18_1_1"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_gn_18_1_1"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("gn1811", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("gn1811"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
+# Code for loading data from raw schema to ods schema for gn28
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+txnID = "MS1_1000001"
+# Initialize Spark session
+
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+
+# Step 2: Define source and target paths
+source_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/raw_gn_28"  # Update path
+target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_gn_28"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+    target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("gn28", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("gn28"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
+
+
+
+
