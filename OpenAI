@@ -12,7 +12,7 @@ MIN_GROUP_SIZE = 50   # Small parent groups (< this many rows) will be merged to
 MODEL = "gpt-4.1"     # OpenAI model to use
 TEMPERATURE = 0       # Deterministic output
 
-endpoint = "https://adq-aifoundrytest.cognitiveservices.azure.com/openai/v1/"
+endpoint = ""
 #model_name = "gpt-4.1"
 #deployment_name = "gpt-4.1"
 
