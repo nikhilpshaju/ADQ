@@ -1,3 +1,8 @@
+pip install filelock==3.11.0
+pip install PyJWT>=2.6.0
+pip install fsspec==2023.6.0
+
+
 https://github.com/enterprises/ey/sso
 
 "C:\Users\npshaju\AppData\Local\Programs\Python\Python313\python.exe" "C:\Users\npshaju\AppData\Local\Programs\Python\Python313\Install Certificates.command"
