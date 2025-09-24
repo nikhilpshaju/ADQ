@@ -1,0 +1,19 @@
+from office365.sharepoint.client_context import ClientContext
+from office365.runtime.auth.user_credential import UserCredential
+
+site_url = "https://sites.ey.com/sites/UniversalBot_DEV"
+ctx = ClientContext(site_url).with_credentials(UserCredential("m", ""))
+folder = ctx.web.get_folder_by_server_relative_url("/sites/UniversalBot_DEV/Testing/GRPs_and_Portfolio_Co_Stat_FS_2025/Samples")
+print("Folder contents:")
+files = folder.files
+ctx.load(files)
+ctx.execute_query()
+for file in files:
+    print("File:", file.properties["Name"])
+
+# Print subfolders in the folder
+folders = folder.folders
+ctx.load(folders)
+ctx.execute_query()
+for subfolder in folders:
+    print("Folder:", subfolder.properties["Name"])
