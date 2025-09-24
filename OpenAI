@@ -16,8 +16,8 @@ endpoint = "https://adq-aifoundrytest.cognitiveservices.azure.com/openai/v1/"
 #model_name = "gpt-4.1"
 #deployment_name = "gpt-4.1"
 
-
- "/lakehouse/default/Files/AzTest"
+#TBD Key
+#TBD Path
 
 # =====================
 
@@ -332,8 +332,8 @@ run_in_parent_batches(normalized_rows)
 
 from openai import OpenAI
 
-endpoint = "https://adq-aifoundrytest.cognitiveservices.azure.com/openai/v1/"
-api_key = "3S7cHqjYzrJ6ribAkimOtQDQUamKkKB21CpXC0ro8NaE1ptRfS7hJQQJ99BHACYeBjFXJ3w3AAAAACOG8Sx9"
+endpoint = ""
+api_key = ""
 
 client = OpenAI(
     base_url=f"{endpoint}",
