@@ -1,0 +1,469 @@
+!pip install openai
+------_______________________________________________________________________________-
+import os
+import json
+import csv
+from openai import OpenAI
+
+# =====================
+# CONFIGURATION
+# =====================
+MIN_GROUP_SIZE = 50   # Small parent groups (< this many rows) will be merged together
+MODEL = "gpt-4.1"     # OpenAI model to use
+TEMPERATURE = 0       # Deterministic output
+
+endpoint = "https://adq-aifoundrytest.cognitiveservices.azure.com/openai/v1/"
+#model_name = "gpt-4.1"
+#deployment_name = "gpt-4.1"
+
+
+ "/lakehouse/default/Files/AzTest"
+
+# =====================
+
+
+client = OpenAI(
+    base_url=f"{endpoint}",
+    api_key=api_key
+)
+
+
+
+# -------------------
+# 1. System Prompt (ruleset)
+# -------------------
+SYSTEM_PROMPT = """
+You are an AI assistant reviewing a Quarterly Financial Statement (FS) Review Pack.
+Your task is to validate commentary provided against variances along three dimensions: Existence, Completeness, and Accuracy. Follow the rules carefully and return a structured JSON output in the specified schema.
+
+User Prompt (role = user):
+You will be given input data in the following format:
+• Line Item
+• Current Year Value (CY)
+• Previous Year Value (PY)
+• Difference (absolute)
+• Percentage Change
+• Commentary
+
+Rules for interpreting input:
+• The last line item is always the parent (sub-FSLI).
+• All lines above the parent are child accounts.
+• If there is only one line item, treat it as the parent line.
+
+Validation Rules
+1. Existence
+• Check at the parent (sub-FSLI) level.
+• If parent variance exceeds the materiality threshold and at least one child account has any commentary other than “0”, then Existence = Pass.
+• Treat “Immaterial” as valid commentary (it counts for existence).
+• Do not fail existence because some children are missing commentary.
+• Do not require parent line commentary — only children count.
+
+
+2. Completeness
+• Commentary at the child level should collectively explain ≥80% of the parent variance.
+• Apply checks in this order:
+1. If commentary includes numbers, extract them and apply signs based on direction words.
+  - Apply direction at the number level, not the sentence level:
+  - If a number is directly preceded or followed by a direction keyword (“increase”, “decrease”, “rise”, “drop”, “additional”, “offset by”), apply that sign only to that number.
+  - If multiple numbers in the same commentary have different directions, treat them separately and sum the results.
+  - If no direction keyword is found near a number, assume it is positive.
+  - Scale units properly:
+    - m, mn, mio, million → multiply by 1,000,000
+    - bn, billion → multiply by 1,000,000,000
+    - k, thousand → multiply by 1,000
+  - Ignore irrelevant numbers:
+    - Years/dates (e.g., 2025, FY2024, Q1 2025)
+    - Small standalone identifiers ≤100 without units (e.g., “16 OSSA”, “Note 37”, “section 5”)
+2. If multiple numbers are extracted, sum them after applying direction and scaling.
+3. If no numbers are present, but the wording clearly indicates that the entire variance is explained (e.g., reclassification, FX translation, acquisition/disposal, provision release), treat this as a Pass.
+4. If neither numeric nor qualitative full coverage is established, sum variances of child accounts with commentary and compare against parent variance. Include commentary even if child variance = 0.
+• Apply AI judgment: if explanation is vague or insufficient even if ≥80%, flag as Incomplete.
+• In the output justification, include worked-out calculations showing how the explained amount was derived. Example:
+Pass. Explained 149.5m (91.75% of 162.94m) → passes 80% threshold. 29.5m + 26m = 55.5m | 43m + 19m – 32m = 30m → correctly applied as +30m | Total explained = 55.5m + 94m = 149.5m
+
+3. Accuracy
+• Commentary must correctly reflect direction of variance at parent level.
+• If commentary is from only one child account → check against parent variance direction.
+• If multiple child accounts → check each against its own variance.
+  - If all pass → Accurate.
+  - If some pass and some fail → Inconclusive (list failing accounts).
+• Reasoning must be specific and logical (“higher sales,” “FX impact,” “new acquisition”). If vague (“business reasons,” “changes”), flag as Accuracy fail.
+• Use AI judgment to confirm explanation makes sense in context.
+• In the output justification, include direction reasoning with examples from the commentary. Example:
+Pass. Directions in the commentary match the variances: Government payable commentary states 'increase' (positive variance +135.4m). Non-government commentary states 'increase … partly offset by decrease' (positive variance +27.5m with offsets). Wording is specific (interest, accruals, fabrication costs, demobilisation) and consistent with variance directions.
+
+4. Output Format
+• Final output must be at parent (sub-FSLI) level, but show supporting details from child accounts.
+• For each parent (sub-FSLI), output as JSON with fields:
+{
+  "Sub-FSLI": "<Parent Line Item>",
+  "Existence": {
+    "status": "Pass/Fail",
+    "justification": "<existence reasoning>"
+  },
+  "Completeness": {
+    "status": "Pass/Fail",
+    "explained_amount": <numeric>,
+    "coverage_percentage": <numeric>,
+    "basis": [
+      {
+        "account": "<Child Line Item>",
+        "commentary": "<Child Commentary>",
+        "explained_amount": <numeric>
+      }
+    ],
+    "justification": "<detailed reasoning with calculations>"
+  },
+  "Accuracy": {
+    "status": "Pass/Fail/Inconclusive",
+    "direction_check": "<direction consistency result>",
+    "reasoning_check": "<detailed reasoning with commentary direction validation>"
+  },
+  "Final_Status": "OK / Missing / Incomplete / Inaccurate / Inconclusive",
+  "Overall_Justification": "<short summary combining the 3 checks>"
+}
+"""
+
+
+
+# -------------------
+# 2. Normalize rows
+# -------------------
+def normalize_row(row):
+    return {
+        "line_item": row.get("Line Item", "").strip(),
+        "CY": row.get("CY Value", "0") or "0",
+        "PY": row.get("PY Value", "0") or "0",
+        "difference": row.get("Difference", "0") or "0",
+        "pct_change": row.get("% Change", "0") or "0",
+        "comment": row.get("Commentary", "").strip(),
+    }
+
+# -------------------
+# 3. Format rows into Markdown table
+# -------------------
+def format_rows_as_table(rows):
+    header = "| Line Item | CY Value | PY Value | Difference | % Change | Comment |"
+    lines = []
+    for row in rows:
+        lines.append(
+            f"| {row['line_item']} | {row['CY']} | {row['PY']} | {row['difference']} | {row['pct_change']} | {row['comment']} |"
+        )
+    return header + "\n" + "\n".join(lines)
+
+# -------------------
+# Run one batch (parent group)
+# -------------------
+def run_batch(rows, model=MODEL, temperature=TEMPERATURE):
+    user_message = "Validate the following financial statement data:\n\n" + format_rows_as_table(rows)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=temperature,
+    )
+    return response.choices[0].message.content
+
+# -------------------
+# Save JSON safely
+# -------------------
+def save_json(content, parent_name, batch_index):
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    # sanitize parent name for filename
+    safe_name = parent_name.replace(" ", "_").replace("/", "_").replace(":", "_")
+    file_path = os.path.join(RESULTS_DIR, f"batch_{batch_index}_{safe_name}.json")
+
+    try:
+        parsed = json.loads(content)
+        
+        # Save JSON
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(parsed, f, indent=2, ensure_ascii=False)
+        
+        # Print JSON to console (pretty)
+        print(f"\n Output for {parent_name} (Batch {batch_index}):")
+        print(json.dumps(parsed, indent=2, ensure_ascii=False))
+        print(f" Saved JSON to {file_path}")
+        
+        return parsed
+
+    except json.JSONDecodeError:
+        # Save raw text for debugging
+        error_path = file_path.replace(".json", "_RAW.txt")
+        with open(error_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"\n Could not parse JSON for {parent_name} (Batch {batch_index}). Raw output saved to {error_path}")
+        print(content)  # print raw content in console
+        return None
+
+
+# -------------------
+# 5. Group rows by MAIN parent (+GN), merge small groups
+# -------------------
+def split_by_main_parent_and_merge(all_rows, min_group_size=MIN_GROUP_SIZE):
+    """
+    Groups rows by main parent (+GN).
+    - Each main parent group is kept intact (no splitting even if >50 rows).
+    - Small consecutive groups (< min_group_size rows) are merged together.
+    """
+    raw_groups = []
+    current_group = []
+
+    for row in all_rows:
+        if row["line_item"].startswith("+GN"):
+            if current_group:
+                raw_groups.append(current_group)
+                current_group = []
+        current_group.append(row)
+
+    if current_group:
+        raw_groups.append(current_group)
+
+    # Merge small groups
+    final_groups = []
+    temp_group = []
+
+    for g in raw_groups:
+        if len(g) < min_group_size:
+            temp_group.extend(g)
+            if len(temp_group) >= min_group_size:
+                final_groups.append(temp_group)
+                temp_group = []
+        else:
+            if temp_group:
+                final_groups.append(temp_group)
+                temp_group = []
+            final_groups.append(g)
+
+    if temp_group:
+        final_groups.append(temp_group)
+
+    return final_groups
+
+# -------------------
+# Run in parent-level batches with JSON export
+# -------------------
+def run_in_parent_batches(all_rows, min_group_size=MIN_GROUP_SIZE):
+    groups = split_by_main_parent_and_merge(all_rows, min_group_size=min_group_size)
+    consolidated = []
+
+    for i, group in enumerate(groups, start=1):
+        parent_names = [r["line_item"] for r in group if r["line_item"].startswith("+GN")]
+        parents_str = ", ".join(parent_names) if parent_names else "Unknown_Parent"
+
+        print(f"\n--- Running batch {i}/{len(groups)} (Parents: {parents_str}, Rows: {len(group)}) ---")
+        result = run_batch(group)
+        print(result)
+
+        parsed = save_json(result, parents_str, i)
+        if parsed:
+            consolidated.append(parsed)
+
+    # Save consolidated file
+    consolidated_path = os.path.join(RESULTS_DIR, "all_results.json")
+    with open(consolidated_path, "w", encoding="utf-8") as f:
+        json.dump(consolidated, f, indent=2, ensure_ascii=False)
+    print(f"\n Consolidated results saved to {consolidated_path}")
+
+    return consolidated
+    
+
+# -------------------
+# 7. Load from CSV (if needed)
+# -------------------
+def load_from_csv(file_path):
+    rows = []
+    with open(file_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(normalize_row(row))
+    return rows
+
+# -------------------
+# 8. Example run (replace with CSV input if available)
+# -------------------
+if __name__ == "__main__":
+    rows = [
+        #{"Line Item":"Interest payable","CY Value":"0","PY Value":"1","Difference":"-1","% Change":"-76","Commentary":"Immaterial"},
+        #{"Line Item":"Other payables","CY Value":"13939767","PY Value":"12772777","Difference":"1166990","% Change":"9","Commentary":"Immaterial"},
+        #{"Line Item":"Salary payable","CY Value":"78935188","PY Value":"148545483","Difference":"-69610295","% Change":"-47","Commentary":"Decrease of AED 70m from bonus due to payment in Q1."},
+        #{"Line Item":"+Employee payables - current","CY Value":"78935188","PY Value":"148545483","Difference":"-69610295","% Change":"-47","Commentary":"0"},
+        #{"Line Item":"+GN 28 - Other payables","CY Value":"110178815","PY Value":"169190979","Difference":"-59012165","% Change":"-35","Commentary":"0"},
+        #{"Line Item":"Some other child","CY Value":"123","PY Value":"456","Difference":"-333","% Change":"-73","Commentary":"0"},
+        #{"Line Item":"+GN 29 - Borrowings","CY Value":"500","PY Value":"450","Difference":"50","% Change":"11","Commentary":""},
+
+        {"Line Item":"Interest payable","CY Value":"0","PY Value":"1","Difference":"-1","% Change":"-76","Commentary":"Immaterial"},
+        {"Line Item":"Dividend payable/unclaimed dividend","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Bank guarantees","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Other payables","CY Value":"13939767","PY Value":"12772777","Difference":"1166990","% Change":"9","Commentary":"Immaterial"},
+        {"Line Item":"77 XYZ Intercompany dividend payable","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Dividends from listed companies payable","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Other current liability","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Settlement payables","CY Value":"17303858","PY Value":"7872718","Difference":"9431140","% Change":"120","Commentary":"0"},
+        {"Line Item":"Salary payable","CY Value":"78935188","PY Value":"148545483","Difference":"-69610295","% Change":"-47","Commentary":"Decrease of AED 70m from bonus due to payment in Q1."},
+        {"Line Item":"Employee vacation payable","CY Value":"0","PY Value":"0","Difference":"0","% Change":"100","Commentary":"0"},
+        {"Line Item":"+Employee payables - current","CY Value":"78935188","PY Value":"148545483","Difference":"-69610295","% Change":"-47","Commentary":"0"},
+        {"Line Item":"XYZ Intercompany payables - current","CY Value":"0","PY Value":"0","Difference":"0","% Change":"100","Commentary":"0"},
+        {"Line Item":"Intracompany payables - current","CY Value":"1","PY Value":"0","Difference":"1","% Change":"270","Commentary":"Immaterial"},
+        {"Line Item":"Advances/deposits received - current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Security deposits received - current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Other deposits received - current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Banking: Customer Deposits Current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"+Deposits received - current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"+GN 28 - Other payables","CY Value":"110178815","PY Value":"169190979","Difference":"-59012165","% Change":"-35","Commentary":"0"},
+
+    ]
+
+    
+
+normalized_rows = [normalize_row(r) for r in rows]
+run_in_parent_batches(normalized_rows)
+
+
+---------------------------------------------------------------------------------------------------------------------------------------[
+
+
+
+
+
+
+from openai import OpenAI
+
+endpoint = "https://adq-aifoundrytest.cognitiveservices.azure.com/openai/v1/"
+api_key = "3S7cHqjYzrJ6ribAkimOtQDQUamKkKB21CpXC0ro8NaE1ptRfS7hJQQJ99BHACYeBjFXJ3w3AAAAACOG8Sx9"
+
+client = OpenAI(
+    base_url=f"{endpoint}",
+    api_key=api_key
+)
+
+
+prompt = """
+You are an AI assistant reviewing a Quarterly Financial Statement (FS) Review Pack.
+Your task is to validate commentary provided against variances along three dimensions: Existence, Completeness, and Accuracy. Follow the rules carefully and return a structured JSON output in the specified schema.
+
+User Prompt (role = user):
+You will be given input data in the following format:
+• Line Item
+• Current Year Value (CY)
+• Previous Year Value (PY)
+• Difference (absolute)
+• Percentage Change
+• Commentary
+
+Rules for interpreting input:
+• The last line item is always the parent (sub-FSLI).
+• All lines above the parent are child accounts.
+• If there is only one line item, treat it as the parent line.
+
+Validation Rules
+1. Existence
+•	Check at the parent (sub-FSLI) level.
+•	If parent variance exceeds the materiality threshold and at least one child account has any commentary other than “0”, then Existence = Pass.
+•	Treat “Immaterial” as valid commentary (it counts for existence).
+•	Do not fail existence because some children are missing commentary.
+•	Do not require parent line commentary — only children count.
+
+2. Completeness
+• Commentary at the child level should collectively explain ≥80% of the parent variance.
+• Apply checks in this order:
+1. If commentary includes numbers, extract them and apply signs based on direction words.
+  - Apply direction at the number level, not the sentence level:
+  - If a number is directly preceded or followed by a direction keyword (“increase”, “decrease”, “rise”, “drop”, “additional”, “offset by”), apply that sign only to that number.
+  - If multiple numbers in the same commentary have different directions, treat them separately and sum the results.
+  - If no direction keyword is found near a number, assume it is positive.
+  - Scale units properly:
+    - m, mn, mio, million → multiply by 1,000,000
+    - bn, billion → multiply by 1,000,000,000
+    - k, thousand → multiply by 1,000
+  - Ignore irrelevant numbers:
+    - Years/dates (e.g., 2025, FY2024, Q1 2025)
+    - Small standalone identifiers ≤100 without units (e.g., “16 OSSA”, “Note 37”, “section 5”)
+2. If multiple numbers are extracted, sum them after applying direction and scaling.
+3. If no numbers are present, but the wording clearly indicates that the entire variance is explained (e.g., reclassification, FX translation, acquisition/disposal, provision release), treat this as a Pass.
+4. If neither numeric nor qualitative full coverage is established, sum variances of child accounts with commentary and compare against parent variance. Include commentary even if child variance = 0.
+• Apply AI judgment: if explanation is vague or insufficient even if ≥80%, flag as Incomplete.
+• In the output justification, include worked-out calculations showing how the explained amount was derived. Example:
+Pass. Explained 149.5m (91.75% of 162.94m) → passes 80% threshold. 29.5m + 26m = 55.5m | 43m + 19m – 32m = 30m → correctly applied as +30m | Total explained = 55.5m + 94m = 149.5m
+
+3. Accuracy
+• Commentary must correctly reflect direction of variance at parent level.
+• If commentary is from only one child account → check against parent variance direction.
+• If multiple child accounts → check each against its own variance.
+  - If all pass → Accurate.
+  - If some pass and some fail → Inconclusive (list failing accounts).
+• Reasoning must be specific and logical (“higher sales,” “FX impact,” “new acquisition”). If vague (“business reasons,” “changes”), flag as Accuracy fail.
+• Use AI judgment to confirm explanation makes sense in context.
+• In the output justification, include direction reasoning with examples from the commentary. Example:
+Pass. Directions in the commentary match the variances: Government payable commentary states 'increase' (positive variance +135.4m). Non-government commentary states 'increase … partly offset by decrease' (positive variance +27.5m with offsets). Wording is specific (interest, accruals, fabrication costs, demobilisation) and consistent with variance directions.
+
+4. Output Format
+• Final output must be at parent (sub-FSLI) level, but show supporting details from child accounts.
+• For each parent (sub-FSLI), output as JSON with fields:
+{
+  "Sub-FSLI": "<Parent Line Item>",
+  "Existence": {
+    "status": "Pass/Fail",
+    "justification": "<existence reasoning>"
+  },
+  "Completeness": {
+    "status": "Pass/Fail",
+    "explained_amount": <numeric>,
+    "coverage_percentage": <numeric>,
+    "basis": [
+      {
+        "account": "<Child Line Item>",
+        "commentary": "<Child Commentary>",
+        "explained_amount": <numeric>
+      }
+    ],
+    "justification": "<detailed reasoning with calculations>"
+  },
+  "Accuracy": {
+    "status": "Pass/Fail/Inconclusive",
+    "direction_check": "<direction consistency result>",
+    "reasoning_check": "<detailed reasoning with commentary direction validation>"
+  },
+  "Final_Status": "OK / Missing / Incomplete / Inaccurate / Inconclusive",
+  "Overall_Justification": "<short summary combining the 3 checks>"
+}
+"""
+
+input_table = """|Line Item|CY Value|PY Value|Difference|% Change|Commentary|
+|Interest payable|0|1|-1|-76|Immaterial|
+|Dividend payable/unclaimed dividend|0|0||0|0|
+|Bank guarantees|0|0||0|0|
+|Other payables|13939767|12772777|1166990|9|Immaterial|
+|77 XYZ Intercompany dividend payable|0|0||0|0|
+|Dividends from listed companies payable|0|0||0|0|
+|Other current liability|0|0||0|0|
+|Settlement payables|17303858|7872718|9431140|120|0|
+|Salary payable|78935188|148545483|-69610295|-47|Decrease of AED 70m from bonus due to payment in Q1.|
+|Employee vacation payable|0|0|0|100|0|
+|+Employee payables - current|78935188|148545483|-69610295|-47|0|
+|XYZ Intercompany payables - current|0|0|0|100|0|
+|Intracompany payables - current|1|0|1|270|Immaterial|
+|Advances/deposits received - current|0|0||0|0|
+|Security deposits received - current|0|0||0|0|
+|Other deposits received - current|0|0||0|0|
+|Banking: Customer Deposits Current|0|0||0|0|
+|+Deposits received - current|0|0||0|0|
+|+GN 28 - Other payables|110178815|169190979|-59012165|-35|0|"""
+
+response = client.chat.completions.create(
+    model="gpt-4.1",
+    messages=[
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": input_table}
+    ],
+    temperature=0
+)
+
+print(response.choices[0].message.content)
+
+
+--------------------
+3S7cHqjYzrJ6ribAkimOtQDQUamKkKB21CpXC0ro8NaE1ptRfS7hJQQJ99BHACYeBjFXJ3w3AAAAACOG8Sx9
