@@ -1,0 +1,376 @@
+# Version 1
+
+!pip install pandas openpyxl
+!pip install deltalake pandas
+
+import pandas as pd
+# Path to Excel file in Lakehouse Files
+excel_path = "/lakehouse/default/Files/ADQTestSampleData.xlsx"
+display(excel_path)
+
+
+tabs = pd.read_excel(excel_path, sheet_name=None, engine='openpyxl')
+
+# List sheet names
+tabname = list(tabs.keys())
+display(tabname)
+
+
+
+
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+
+# display(tabname)
+
+for tabname, df in tabs.items():
+    # Convert to Spark DataFrame
+    sdf = spark.createDataFrame(df)
+    # display(sdf)
+    # print(sdf.dtypes)
+    # print(sdf.head())
+    # print (sdf.columns)
+    
+    # Clean sheet name for table naming
+    tablename = tabname.strip().replace(" ", "").replace("-", "").replace("_", "")
+    display(tablename)
+
+
+    # Write to Lakehouse as Delta table
+    # sdf.write.format("delta").mode("overwrite").saveAsTable(tablename)
+
+    print(f"Created table: {tablename}")
+
+
+
+
+
+
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+
+# Path to Excel file in Lakehouse Files
+excel_path = "/lakehouse/default/Files/ADQTestSampleData.xlsx"
+# display(excel_path)
+
+# Initialize Spark session
+spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+        .getOrCreate()
+
+# Read all sheets
+tabs = pd.read_excel(excel_path, sheet_name=None, engine='openpyxl')
+# display(tabs)
+
+for tabname, df in tabs.items():
+    print(f"\n🔄 Processing sheet: {tabname}")
+    display(df)
+    
+
+    # Validate headers
+    if df.columns.isnull().any():
+        print(f"❌ Skipping '{tabname}': Missing column headers.")
+        continue
+
+    # Validate and clean unsupported data types
+    for col in df.columns:
+        if df[col].dtype not in ['int64', 'float64', 'bool', 'datetime64[ns]', 'object']:
+            print(f"⚠️ Column '{col}' in '{tabname}' has unsupported type '{df[col].dtype}'. Converting to string.")
+            df[col] = df[col].astype(str)
+
+    
+
+    # Try converting to Spark DataFrame
+    try:
+        sdf = spark.createDataFrame(df)
+        sdf.printSchema()
+    except Exception as e:
+        print(f"❌ Error converting '{tabname}' to Spark DataFrame: {e}")
+        continue
+
+
+    # Clean sheet name for table naming
+    tablename = tabname.strip().replace(" ", "").replace("-", "")
+    tabtable = "/lakehouse/default/Tables/"+tablename
+    display(tabtable)
+
+
+    # Try writing to Lakehouse
+    try:
+        sdf.write.mode("overwrite").format("delta").saveAsTable(tablename)
+        print(f"✅ Created table: {tablename}")
+    except Exception as e:
+        print(f"❌ Error writing table '{tablename}': {e}")
+
+
+
+
+
+
+
+
+#Version 2---------------------
+
+
+!pip install pandas openpyxl
+!pip install deltalake pandas
+!pip install delta-spark
+!pip install delta-spark==4.0.0
+
+
+conda install -c conda-forge openjdk=17
+
+
+import pandas as pd
+from pyspark.sql import SparkSession
+
+# print(spark.version)
+
+# Path to Excel file in Lakehouse Files
+excel_path = "/lakehouse/default/Files/ADQTestSampleData.xlsx"
+print(f"📄 Excel file path: {excel_path}")
+
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("ADQFabricLHDev01") \
+    .config("spark.jars.packages", "io.delta:delta-core_2.12:4.0.0") \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+    .getOrCreate()
+
+
+# Read all sheets
+tabs = pd.read_excel(excel_path, sheet_name=None, engine='openpyxl')
+print(f"📊 Sheets found: {list(tabs.keys())}")
+
+for tabname, df in tabs.items():
+    print(f"\n🔄 Processing sheet: {tabname}")
+
+    # Validate headers
+    if df.columns.isnull().any():
+        print(f"❌ Skipping '{tabname}': Missing column headers.")
+        continue
+
+    # Clean column names
+    cleaned_columns = [
+        col.strip()
+           .replace(" ", "")
+           .replace("-", "_")
+           .replace(".", "")
+           .replace("%", "pc")
+           .replace("/", "")
+           .replace("(", "")
+           .replace(")", "")
+        for col in df.columns
+    ]
+    df.columns = cleaned_columns
+
+    # Validate and clean unsupported data types
+    for col in df.columns:
+        if df[col].dtype not in ['int64', 'float64', 'bool', 'datetime64[ns]', 'object']:
+            print(f"⚠️ Column '{col}' in '{tabname}' has unsupported type '{df[col].dtype}'. Converting to string.")
+            df[col] = df[col].astype(str)
+
+    # Convert to Spark DataFrame
+    try:
+        sdf = spark.createDataFrame(df)
+        # sdf.printSchema()
+    except Exception as e:
+        print(f"❌ Error converting '{tabname}' to Spark DataFrame: {e}")
+        continue
+
+    # Clean sheet name for table naming
+    table_name = tabname.strip().replace(" ", "_").replace("-", "").replace(".", "_")
+
+    # Write to Delta Lake
+    try:
+        sdf.write.mode("overwrite").format("delta").saveAsTable(table_name)
+        print(f"✅ Created Delta table: {table_name}")
+    except Exception as e:
+        print(f"❌ Error writing table '{table_name}': {e}")
+
+
+
+
+from pyspark.sql import SparkSession
+from delta.tables import DeltaTable
+
+# Sample DataFrame
+data = [("Alice", 34), ("Bob", 45)]
+df = spark.createDataFrame(data, ["name", "age"])
+
+# Write to Delta format
+df.write.format("delta").mode("overwrite").save("/tmp/delta-test")
+
+# Read back using DeltaTable
+dt = DeltaTable.forPath(spark, "/tmp/delta-test")
+dt.toDF().show()
+
+
+
+
+import pandas as pd
+from pyspark.sql import SparkSession
+from delta.tables import DeltaTable
+
+print(spark.version)
+
+# Path to Excel file in Lakehouse Files
+excel_path = "/lakehouse/default/Files/ADQTestSampleData.xlsx"
+print(f"📄 Excel file path: {excel_path}")
+
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("ADQFabricLHDev01") \
+    .config("spark.jars.packages", "io.delta:delta-core_2.12:4.0.0") \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+    .getOrCreate()
+
+
+print("✅ Delta Lake is ready!")
+
+# Read all sheets
+tabs = pd.read_excel(excel_path, sheet_name=None, engine='openpyxl')
+print(f"📊 Sheets found: {list(tabs.keys())}")
+
+for tabname, df in tabs.items():
+    print(f"\n🔄 Processing sheet: {tabname}")
+
+    # Validate headers
+    if df.columns.isnull().any():
+        print(f"❌ Skipping '{tabname}': Missing column headers.")
+        continue
+
+    # Clean column names
+    cleaned_columns = [
+        col.strip()
+           .replace(" ", "")
+           .replace("-", "_")
+           .replace(".", "")
+           .replace("%", "pc")
+           .replace("/", "")
+           .replace("(", "")
+           .replace(")", "")
+        for col in df.columns
+    ]
+    df.columns = cleaned_columns
+
+    # Validate and clean unsupported data types
+    for col in df.columns:
+        if df[col].dtype not in ['int64', 'float64', 'bool', 'datetime64[ns]', 'object']:
+            print(f"⚠️ Column '{col}' in '{tabname}' has unsupported type '{df[col].dtype}'. Converting to string.")
+            df[col] = df[col].astype(str)
+
+    # Convert to Spark DataFrame
+    try:
+        sdf = spark.createDataFrame(df)
+        sdf.printSchema()
+    except Exception as e:
+        print(f"❌ Error converting '{tabname}' to Spark DataFrame: {e}")
+        continue
+
+    # Clean sheet name for table naming
+    table_name = tabname.strip().replace(" ", "").replace("-", "_").replace(".", "_")
+    print(f" Table Name '{tablename}")
+    tablename = "/lakehouse/default/Files/" + table_name
+
+    # Write to Delta format
+    sdf.write.format("delta").mode("overwrite").save(tablename)
+
+    # Read back using DeltaTable
+    dt = DeltaTable.forPath(spark, tablename)
+    dt.toDF().show()
+
+
+
+
+
+
+import os
+import pandas as pd
+from pyspark.sql import SparkSession
+from delta.tables import DeltaTable
+
+# Initialize Spark session
+spark = SparkSession.builder.getOrCreate()
+
+# Path to Excel file
+excel_path = "/lakehouse/default/Files/ADQTestSampleData.xlsx"
+print(f"📄 Excel file path: {excel_path}")
+
+# Read all sheets
+tabs = pd.read_excel(excel_path, sheet_name=None, engine='openpyxl')
+print(f"📊 Sheets found: {list(tabs.keys())}")
+
+for tabname, df in tabs.items():
+    print(f"\n🔄 Processing sheet: {tabname}")
+
+    # Validate headers
+    if df.columns.isnull().any():
+        print(f"❌ Skipping '{tabname}': Missing column headers.")
+        continue
+
+    # Clean column names
+    cleaned_columns = [
+        col.strip()
+           .replace(" ", "")
+           .replace("-", "_")
+           .replace(".", "")
+           .replace("%", "pc")
+           .replace("/", "")
+           .replace("(", "")
+           .replace(")", "")
+        for col in df.columns
+    ]
+    df.columns = cleaned_columns
+
+    # Clean unsupported data types
+    for col in df.columns:
+        if df[col].dtype not in ['int64', 'float64', 'bool', 'datetime64[ns]', 'object']:
+            print(f"⚠️ Column '{col}' in '{tabname}' has unsupported type '{df[col].dtype}'. Converting to string.")
+            df[col] = df[col].astype(str)
+
+    # Convert to Spark DataFrame
+    try:
+        sdf = spark.createDataFrame(df)
+        sdf.printSchema()
+    except Exception as e:
+        print(f"❌ Error converting '{tabname}' to Spark DataFrame: {e}")
+        continue
+
+    # Clean sheet name for table naming
+    table_name = tabname.strip().replace(" ", "").replace("-", "_").replace(".", "_")
+    delta_path = f"/tmp/delta/{table_name}"  
+    print(f"📁 Writing Delta table to: {delta_path}")
+
+    # Write to Delta format
+    try:
+        sdf.write.format("delta").mode("overwrite").save(delta_path)
+        print(f"✅ Delta table written: {table_name}")
+    except Exception as e:
+        print(f"❌ Error writing table '{table_name}': {e}")
+        continue
+
+    # Read back using DeltaTable
+    try:
+        dt = DeltaTable.forPath(spark, delta_path)
+        dt.toDF().show()
+    except Exception as e:
+        print(f"❌ Error reading Delta table '{table_name}': {e}")
+
+
+
+import pandas as pd
+from notebookutils import mssparkutils
+
+inputpath = "Files/Input/ADQRawInput.xlsx"
+
+with mssparkutils.fs.open(inputpath, "rb") as f:
+    tabs = pd.read_excel(f, sheet_name=None, engine="openpyxl")
+
+print("Sheets:", list(tabs.keys()))
+
