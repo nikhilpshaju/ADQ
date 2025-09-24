@@ -1,4 +1,11 @@
-  File "C:\Users\npshaju\AppData\Local\Programs\Python\Python313\Lib\site-packages\requests\sessions.py", line 589, in request
+pip install Office365-REST-Python-Client
+pip install msal
+pip install requests
+pip install PyJWT
+pip install pandas
+
+
+File "C:\Users\npshaju\AppData\Local\Programs\Python\Python313\Lib\site-packages\requests\sessions.py", line 589, in request
     resp = self.send(prep, **send_kwargs)
   File "C:\Users\npshaju\AppData\Local\Programs\Python\Python313\Lib\site-packages\requests\sessions.py", line 703, in send
     r = adapter.send(request, **kwargs)
