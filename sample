@@ -1,1 +1,18 @@
+
+import pandas as pd
+
+# Load file from Lakehouse
+file_path = "/lakehouse/default/Files/FS_Pack.xlsx"
+df = pd.read_excel(file_path, sheet_name=None)
+
+# Check expected sheets
+expected_sheets = ["Input1", "Input2", "Summary"]
+missing_sheets = [sheet for sheet in expected_sheets if sheet not in df]
+
+if missing_sheets:
+    print(f"Missing sheets: {missing_sheets}")
+else:
+    print("All required sheets are present.")
+
+
 this is a test file
