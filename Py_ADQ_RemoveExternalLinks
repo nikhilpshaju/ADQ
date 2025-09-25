@@ -1,0 +1,157 @@
+import zipfile
+import os
+import shutil
+from lxml import etree
+
+def is_external_reference(formula_text: str) -> bool:
+    """Check if a formula references an external workbook."""
+    if not formula_text:
+        return False
+    formula_text = formula_text.strip()
+    return "[" in formula_text and "]" in formula_text
+
+def is_external_data_validation(formula_text: str) -> bool:
+    """Check if data validation formula refers to an external workbook."""
+    if not formula_text:
+        return False
+    return "[" in formula_text and "]" in formula_text
+
+def clean_excel_file_preserve_internal_dropdowns(input_path, output_path, sheet_names_to_skip=None):
+    if sheet_names_to_skip is None:
+        sheet_names_to_skip = set()
+
+    temp_dir = "temp_excel"
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.mkdir(temp_dir)
+
+    with zipfile.ZipFile(input_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+
+    # STEP 1: Map visible sheet names to XML filenames
+    sheet_name_to_filename = {}
+    try:
+        workbook_path = os.path.join(temp_dir, 'xl', 'workbook.xml')
+        tree = etree.parse(workbook_path)
+        root = tree.getroot()
+        ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+        id_to_sheetname = {}
+        for sheet in root.findall('main:sheets/main:sheet', namespaces=ns):
+            name = sheet.get("name")
+            rid = sheet.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+            id_to_sheetname[rid] = name
+
+        rels_path = os.path.join(temp_dir, 'xl', '_rels', 'workbook.xml.rels')
+        tree = etree.parse(rels_path)
+        root = tree.getroot()
+
+        for rel in root.findall("{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"):
+            r_id = rel.get("Id")
+            target = rel.get("Target")
+            if r_id in id_to_sheetname and target.startswith("worksheets/"):
+                xml_name = os.path.basename(target)
+                sheet_name_to_filename[id_to_sheetname[r_id]] = xml_name
+    except Exception as e:
+        print("⚠️ Failed to map sheet names to XML files:", e)
+
+    # STEP 2: Remove externalLinks folder
+    ext_links_dir = os.path.join(temp_dir, 'xl', 'externalLinks')
+    if os.path.exists(ext_links_dir):
+        shutil.rmtree(ext_links_dir)
+
+    # STEP 3: Remove externalLink relationships
+    rels_path = os.path.join(temp_dir, 'xl', '_rels', 'workbook.xml.rels')
+    if os.path.exists(rels_path):
+        tree = etree.parse(rels_path)
+        root = tree.getroot()
+        for rel in list(root):
+            if "externalLink" in rel.get("Target", ""):
+                root.remove(rel)
+        tree.write(rels_path, xml_declaration=True, encoding='utf-8')
+
+    # STEP 4: Remove externalReferences and named ranges with external refs
+    workbook_path = os.path.join(temp_dir, 'xl', 'workbook.xml')
+    if os.path.exists(workbook_path):
+        ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+        tree = etree.parse(workbook_path)
+        root = tree.getroot()
+
+        ext_refs = root.find('main:externalReferences', namespaces=ns)
+        if ext_refs is not None:
+            root.remove(ext_refs)
+        #tree.write(workbook_path, xml_declaration=True, encoding='utf-8')
+        
+        defined_names = root.find('main:definedNames', namespaces=ns)
+        if defined_names is not None:
+            for defined_name in list(defined_names):
+                if defined_name.text and '[' in defined_name.text:    
+                    defined_names.remove(defined_name)
+            if len(defined_names) == 0:
+                root.remove(defined_names)
+
+        tree.write(workbook_path, xml_declaration=True, encoding='utf-8')
+
+
+    # STEP 5: Remove calcChain.xml
+    calc_chain_path = os.path.join(temp_dir, 'xl', 'calcChain.xml')
+    if os.path.exists(calc_chain_path):
+        os.remove(calc_chain_path)
+
+    # STEP 6: Process worksheets
+    sheets_dir = os.path.join(temp_dir, 'xl', 'worksheets')
+    if os.path.exists(sheets_dir):
+        for visible_name, xml_filename in sheet_name_to_filename.items():
+            if visible_name in sheet_names_to_skip:
+                print(f"⏭️  Skipping sheet: {visible_name}")
+                continue
+
+            sheet_path = os.path.join(sheets_dir, xml_filename)
+            if os.path.exists(sheet_path):
+                tree = etree.parse(sheet_path)
+                root = tree.getroot()
+                ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+                # Remove external formulas
+                for f in root.findall('.//main:f', namespaces=ns):
+                    if is_external_reference(f.text):
+                        parent = f.getparent()
+                        parent.remove(f)
+
+                # Remove data validations with external references
+                dv_node = root.find('.//main:dataValidations', namespaces=ns)
+                if dv_node is not None:
+                    for dv in list(dv_node):
+                        formula1 = dv.find('main:formula1', namespaces=ns)
+                        if formula1 is not None and is_external_data_validation(formula1.text):
+                            print(f"🗑️  Removing external dropdown from {visible_name}: {formula1.text}")
+                            dv_node.remove(dv)
+                    if len(dv_node) == 0:
+                        parent = dv_node.getparent()
+                        parent.remove(dv_node)
+
+                tree.write(sheet_path, xml_declaration=True, encoding='utf-8')
+
+    # STEP 7: Repackage into cleaned file
+    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
+        for foldername, subfolders, filenames in os.walk(temp_dir):
+            for filename in filenames:
+                filepath = os.path.join(foldername, filename)
+                arcname = os.path.relpath(filepath, temp_dir)
+                zip_out.write(filepath, arcname)
+
+    shutil.rmtree(temp_dir)
+    print(f"\n✅ Cleaned Excel saved to: {output_path}")
+
+# -------------------------
+# ✅ Example usage:
+# -------------------------
+
+# List the sheet names to skip (e.g., "Metadata", "Config")
+sheet_names_to_skip = {"Cover Page", "Working 1"}
+
+clean_excel_file_preserve_internal_dropdowns(
+    input_path="/lakehouse/default/Files/Input/ADQ_Smartview based Package_Review Reports_PROD_16 - Copy.xlsx",
+    output_path="/lakehouse/default/Files/Input/ADQ_Smartview_Linkbroken.xlsx",
+    sheet_names_to_skip=sheet_names_to_skip
+)
