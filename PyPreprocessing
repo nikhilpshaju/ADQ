@@ -1,22 +1,48 @@
-#Importing packages
 import os
 import re
+# import win32com.client
 import unicodedata
+import pythoncom
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils import range_boundaries, get_column_letter
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.cell.cell import MergedCell
 from copy import copy
-
-
-# === Step 1: Set variables
-input_file = "/lakehouse/default/Files/adq-container/ADQ_Smartview based Package_Review Reports_PROD_15.xlsx"
-output_file = "./builtin/Out.xlsx"
-
+ 
+# === Step 1: Break External Links Using win32com ===
+input_file = r"C:\Users\LR667JH\OneDrive - EY\Desktop\new\ADQ_Smartview based Package_Review Reports_PROD_16.xlsx"
+output_file = "out1333.xlsx"
+ 
 if not os.path.exists(input_file):
     print(f"File not found: {input_file}")
     exit()
  
+# excel = win32com.client.Dispatch("Excel.Application")
+# excel.DisplayAlerts = False
+# excel.Visible = False
+ 
+# print("Opening file to break links...")
+# wb_com = excel.Workbooks.Open(Filename=os.path.abspath(input_file), UpdateLinks=False)
+
+# try:
+#     links = wb_com.LinkSources(Type=1)  # External Excel links
+#     if links:
+#         for link in links:
+#             print(f"Breaking link: {link}")
+#             wb_com.BreakLink(Name=link, Type=1)
+#     else:
+#         print("No external links found.")
+#         print("File processing.")
+# except Exception as e:
+#     print(f"Error breaking links: {e}")
+ 
+# if wb_com:
+#     wb_com.SaveAs(os.path.abspath(output_file))
+#     wb_com.Close(SaveChanges=True)
+# excel.Quit()
+# del wb_com
+# del excel
+
 print("Processing........")
 
 # === Step 2: Process output file using openpyxl ===
@@ -356,8 +382,9 @@ for original_name, new_name in sheets_to_copy.items():
         new_sheet.cell(row=1, column=3, value="Prior_Period")
         new_sheet.cell(row=1, column=4, value="Difference")
         new_sheet.cell(row=1, column=5, value="%Change")
-        new_sheet.cell(row=1, column=6, value="Row_No")
- 
+        new_sheet.cell(row=1, column=6, value="commentary")
+        new_sheet.cell(row=1, column=7, value="Row_No")
+
     elif new_name == "GN-28_NEW":
         new_sheet.delete_rows(1, 12)
         new_sheet.cell(row=1, column=2, value="Current_Period")
