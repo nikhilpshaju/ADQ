@@ -1,0 +1,36 @@
+
+
+
+import os
+import shutil
+
+
+def list_files_in_folder(folder_path):
+  """Prints all files in the given folder path."""
+  for entry in os.listdir(folder_path):
+    full_path = os.path.join(folder_path, entry)
+    if os.path.isfile(full_path):
+      print("File:", entry)
+
+def validate_xlsx_files(folder_path, exception_folder_path):
+  """Prints .xlsx files and moves non-.xlsx files to exception folder."""
+  for entry in os.listdir(folder_path):
+    full_path = os.path.join(folder_path, entry)
+    if os.path.isfile(full_path):
+      if entry.lower().endswith('.xlsx'):
+        print("Valid Excel file:", entry)
+      else:
+        print("Moving invalid file to exception folder:", entry)
+        if not os.path.exists(exception_folder_path):
+          os.makedirs(exception_folder_path)
+        shutil.move(full_path, os.path.join(exception_folder_path, entry))
+
+
+# Example usage:
+
+
+folder_path = r"C:\Users\Nikhil.Shaju\OneDrive - EY\GDS Automation\Solution\FAAS -ADQ\Other Docs\Automation_Input"  # Change as needed
+exception_folder_path = r"C:\Users\Nikhil.Shaju\OneDrive - EY\GDS Automation\Solution\FAAS -ADQ\Other Docs\Automation_Exception" # Exception folder inside the input folder
+#list_files_in_folder(folder_path)
+#print("\nValid .xlsx files:")
+validate_xlsx_files(folder_path, exception_folder_path)
