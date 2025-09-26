@@ -1,0 +1,33 @@
+!pip install pandas openpyxl
+!pip install deltalake pandas
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+
+# Define Spark Session (This is usually preconfigured in Microsoft Fabric Notebooks)
+spark = SparkSession.builder.appName("CreateDeltaTable").getOrCreate()
+
+# Define a sample schema
+schema = StructType([
+    StructField("id", IntegerType(), True),
+    StructField("name", StringType(), True),
+    StructField("city", StringType(), True)
+])
+
+# Create sample data
+data = [
+    (1, "Alice", "New York"),
+    (2, "Bob", "Los Angeles"),
+    (3, "Charlie", "Chicago")
+]
+
+# Create DataFrame
+df = spark.createDataFrame(data, schema)
+
+# Write as Delta table to Lakehouse path
+delta_path = "Tables/people"  # Lakehouse path in Fabric
+df.write.format("delta").mode("overwrite").save(delta_path)
+
+# Optional: Register as a table in the metastore
+spark.sql(f"CREATE TABLE IF NOT EXISTS people USING DELTA LOCATION '{delta_path}'")
