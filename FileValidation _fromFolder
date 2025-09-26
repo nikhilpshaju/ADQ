@@ -12,18 +12,44 @@ def list_files_in_folder(folder_path):
     if os.path.isfile(full_path):
       print("File:", entry)
 
-def validate_xlsx_files(folder_path, exception_folder_path):
+# Validation Rule 1
+
+def validate_xlsx_files(folder_path, exception_folder_path, processing_folder_path):
   """Prints .xlsx files and moves non-.xlsx files to exception folder."""
   for entry in os.listdir(folder_path):
     full_path = os.path.join(folder_path, entry)
     if os.path.isfile(full_path):
       if entry.lower().endswith('.xlsx'):
         print("Valid Excel file:", entry)
+        #is_valid = check_required_sheets(full_path, required_sheets)
+        #if is_valid:
+        print(f"Moving valid file to processing folder: {entry}")
+        if not os.path.exists(processing_folder_path):
+         os.makedirs(processing_folder_path)
+        shutil.move(full_path, os.path.join(processing_folder_path, entry))
       else:
         print("Moving invalid file to exception folder:", entry)
         if not os.path.exists(exception_folder_path):
           os.makedirs(exception_folder_path)
         shutil.move(full_path, os.path.join(exception_folder_path, entry))
+
+def check_required_sheets(xlsx_path, required_sheets):
+  """Checks if the Excel file contains all required sheets. Returns True if valid, False otherwise."""
+  try:
+    wb = openpyxl.load_workbook(xlsx_path, read_only=True)
+    sheet_names = wb.sheetnames
+    missing_sheets = [sheet for sheet in required_sheets if sheet not in sheet_names]
+    if missing_sheets:
+      print(f"  -> Missing sheets in {os.path.basename(xlsx_path)}: {missing_sheets}")
+      wb.close()
+      return False
+    else:
+      print(f"  -> All required sheets present in {os.path.basename(xlsx_path)}")
+      wb.close()
+      return True
+  except Exception as e:
+    print(f"  -> Error reading {os.path.basename(xlsx_path)}: {e}")
+    return False
 
 
 # Example usage:
@@ -31,6 +57,6 @@ def validate_xlsx_files(folder_path, exception_folder_path):
 
 folder_path = r"C:\Users\Nikhil.Shaju\OneDrive - EY\GDS Automation\Solution\FAAS -ADQ\Other Docs\Automation_Input"  # Change as needed
 exception_folder_path = r"C:\Users\Nikhil.Shaju\OneDrive - EY\GDS Automation\Solution\FAAS -ADQ\Other Docs\Automation_Exception" # Exception folder inside the input folder
-#list_files_in_folder(folder_path)
-#print("\nValid .xlsx files:")
-validate_xlsx_files(folder_path, exception_folder_path)
+processing_folder_path = r"C:\Users\Nikhil.Shaju\OneDrive - EY\GDS Automation\Solution\FAAS -ADQ\Other Docs\Automation_Processing" # Processing folder
+validate_xlsx_files(folder_path, exception_folder_path, processing_folder_path)
+
