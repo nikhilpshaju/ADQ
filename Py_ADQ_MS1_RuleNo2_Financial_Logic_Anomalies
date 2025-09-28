@@ -6,66 +6,89 @@
 
 
 
-
-
-#ENTITY FINAL
-
-
-
+#ENTITY FINAL SQL logic
 
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, when, lit, concat, trim, regexp_extract
+from pyspark.sql.functions import col, lit, concat, trim, regexp_extract, when
 from pyspark.sql.types import StringType, DoubleType
 
 try:
     # -------------------- Spark session --------------------
-    spark = SparkSession.builder \
-        .appName("ADQFabricLHDev01") \
-        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
+    spark = (
+        SparkSession.builder.appName("ADQFabricLHDev01")
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>")
         .getOrCreate()
+    )
+
+    txn_id = "MS1_1000001"
 
     # -------------------- Paths --------------------
     core_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/core_accounting"
     ods_path  = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_entity_tb"
     target_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/final_entity_tb"
 
-    # -------------------- Read Delta tables --------------------
-    core_df = spark.read.format("delta").load(core_path)
-    ods_df  = spark.read.format("delta").load(ods_path)
+    # -------------------- Read and Register Temp Views --------------------
+    spark.read.format("delta").load(core_path).select(
+        "Account", "signage"
+    ).distinct().createOrReplaceTempView("core_accounts")
 
-    core_df = core_df.select("Account", "signage").distinct()
+    spark.read.format("delta").load(ods_path).filter(
+        col("txnID") == txn_id
+    ).createOrReplaceTempView("filtered_ods")
 
-    # -------------------- Validation logic --------------------
-    amount_col = col("amounts")
-    amount_str = amount_col.cast("string")
-    amount_double = amount_col.cast("double")
-
-    invalid = (amount_col.isNull()) | (trim(amount_str) == "") | \
-              (regexp_extract(amount_str, '^[-]?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?$', 0) == "")
-
-    # -------------------- Apply validation with remarks --------------------
+    # -------------------- Account Validation --------------------
     try:
-        validated_df = ods_df.withColumn(
+        unmatched_accounts_df = spark.sql("""
+            SELECT accounts
+            FROM filtered_ods
+            WHERE accounts NOT IN (SELECT Account FROM core_accounts)
+        """)
+
+        if unmatched_accounts_df.count() > 0:
+            unmatched_list = unmatched_accounts_df.rdd.flatMap(lambda x: x).collect()
+            raise Exception(
+                f"Validation Error: The following accounts in 'ods_entity_tb' are not present in 'core_accounting': {unmatched_list}"
+            )
+    except Exception as validation_error:
+        print("Error during account presence validation:", str(validation_error))
+        raise
+
+    # -------------------- Join and Validation Logic --------------------
+    try:
+        joined_df = spark.sql("""
+            SELECT o.*, c.signage
+            FROM filtered_ods o
+            JOIN core_accounts c
+            ON o.accounts = c.Account
+        """)
+
+        amount_col = col("amounts")
+        amount_str = amount_col.cast("string")
+        amount_double = amount_col.cast("double")
+
+        invalid = (
+            (amount_col.isNull()) |
+            (trim(amount_str) == "") |
+            (~amount_str.rlike(r"^[-]?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$"))
+        )
+
+        validated_df = joined_df.withColumn(
             "Remarks",
             when(
-                (col("accounts").isin([r["Account"] for r in core_df.filter(col("signage") == "Positive").collect()])) &
-                (amount_double < 0),
+                (col("signage") == "Positive") & (amount_double < 0),
                 concat(lit("Positive signage issue: "), amount_str)
             ).when(
-                (col("accounts").isin([r["Account"] for r in core_df.filter(col("signage") == "Negative").collect()])) &
-                (amount_double > 0),
+                (col("signage") == "Negative") & (amount_double > 0),
                 concat(lit("Negative signage issue: "), amount_str)
-            ).when(
-                invalid,
-                lit("Error")
-            ).otherwise(lit(None))  
+            ).when(invalid, lit("Error"))
+            .otherwise(lit(None))
         ).filter(col("Remarks").isNotNull())
     except Exception as validation_error:
         print("Error during validation logic:", str(validation_error))
         raise
 
-    # -------------------- Select output schema --------------------
+    # -------------------- Select Output Schema  --------------------
     try:
         output_df = validated_df.select(
             col("id").cast(StringType()).alias("etID"),
@@ -80,10 +103,10 @@ try:
         print("Error during schema selection:", str(schema_error))
         raise
 
-    # -------------------- Write output --------------------
+    # -------------------- Write Output --------------------
     try:
         output_df.write.format("delta").mode("overwrite").save(target_path)
-        print("Rule 2 validation complete. Failed rows overwritten to:", target_path)
+        print(f"Validation complete for txnID = {txn_id}. Failed rows written to: {target_path}")
     except Exception as write_error:
         print("Error during writing output:", str(write_error))
         raise
@@ -96,7 +119,11 @@ except Exception as e:
 
 
 
-#FINAL SOCIE WITH ERROR REMARKS
+
+
+
+
+#ALL SHEET FINAL (RULE2)
 
 
 
@@ -109,78 +136,242 @@ try:
         .appName("ADQFabricLHDev01") \
         .config("spark.jars.packages", "io.delta:delta-core_2.12:<delta-version>") \
         .getOrCreate()
-    print(" Spark session created successfully.")
+    print(" Spark session created.")
 except Exception as e:
-    print(f" Error creating Spark session: {str(e)}")
+    print(f" [Spark Session Error] Failed to create Spark session: {str(e)}")
     raise
 
 # -------------------- Parameters --------------------
-TXN_ID = "MS1_1000003"
+TXN_ID = "MS1_1000001"
 RULE = "RULE 2"
 
-rules_table = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/core_finacial_signage_mapping"
-data_table = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_socie"
-output_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_reference_socie"
+BASE_PATH = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/"
 
-# -------------------- Load tables --------------------
+rules_table = BASE_PATH + "core_financial_signage_mapping"
+
+data_table_map = {
+    "SOCIE": BASE_PATH + "ods_socie",
+    "GN-17.3": BASE_PATH + "ods_gn_17_3",
+    "CF Review form": BASE_PATH + "ods_cf_review_form", 
+    "GN-18.1.1": BASE_PATH + "ods_gn_18_1_1"             
+}
+
+output_path = BASE_PATH + "ods_reference"
+
+# -------------------- Load rules --------------------
 try:
     spark.read.format("delta").load(rules_table).createOrReplaceTempView("rules_view")
     print(" Rules table loaded.")
 except Exception as e:
-    print(f" Error loading rules_table: {str(e)}")
+    print(f" [Rules Load Error] Failed to load rules table: {str(e)}")
     raise
 
-try:
-    spark.read.format("delta").load(data_table).createOrReplaceTempView("data_view")
-    print(" Data table loaded.")
-except Exception as e:
-    print(f" Error loading data_table: {str(e)}")
-    raise
-
-# -------------------- Load rules --------------------
-try:
-    rules_df = spark.sql("SELECT * FROM rules_view WHERE sheetname = 'SOCIE'")
-    print(f" Loaded {rules_df.count()} rules for sheet 'SOCIE'.")
-except Exception as e:
-    print(f" Error querying rules_view: {str(e)}")
-    raise
 # -------------------- Reference schema --------------------
-reference_schema = [
-    "rulesid", "odsid", "Rule", "PassFailFlag", "Remarks",
-    "AIInsights", "txnID", "sheetName"
-]
-
 try:
+    reference_schema = [
+        "rulesid", "odsid", "Rule", "PassFailFlag", "Remarks",
+        "AIInsights", "txnID", "sheetName"
+    ]
+
     reference_df = spark.createDataFrame(
         [],
         schema="rulesid string, odsid string, Rule string, PassFailFlag string, Remarks string, AIInsights string, txnID string, sheetName string"
     )
-    print(" Initialized empty reference DataFrame.")
+    print(" Reference DataFrame initialized.")
 except Exception as e:
-    print(f" Error creating reference DataFrame: {str(e)}")
+    print(f" [Reference Schema Error] Failed to initialize reference DataFrame: {str(e)}")
     raise
 
-# -------------------- Validation loop --------------------
+# -------------------- Sheets to process --------------------
+sheets_to_process = ["SOCIE", "GN-17.3", "CF Review form", "GN-18.1.1"]
+
+for sheet in sheets_to_process:
+    try:
+        print(f"\n Processing sheet: {sheet}")
+        rules_df = spark.sql(f"SELECT * FROM rules_view WHERE sheetname = '{sheet}'")
+
+        data_table_path = data_table_map.get(sheet)
+        if not data_table_path:
+            print(f" [Missing Table] No data table found for sheet {sheet}")
+            continue
+        spark.read.format("delta").load(data_table_path).createOrReplaceTempView("data_view")
+        available_cols = spark.table("data_view").columns
+    except Exception as e:
+        print(f" [Sheet Load Error] Failed to prepare data for sheet '{sheet}': {str(e)}")
+        continue
+    for rule in rules_df.toLocalIterator():
+        column = rule['header']
+        try:
+            expectedsignage = rule['expectedsignage'].lower()
+            fsli = rule['fsli']
+            sheet_name = rule['sheetname']
+
+            if column not in available_cols:
+                print(f" [Missing Column] Column '{column}' not found in data_view for sheet '{sheet_name}'")
+                continue
+
+            filtered_data_df = spark.table("data_view") \
+                .filter((col("fsli") == fsli) & (col("txnID") == TXN_ID))
+
+            # --- Validation Checks ---
+            is_blank = (col(column).isNull()) | (trim(col(column)) == "")
+            is_non_numeric = regexp_extract(
+                col(column).cast("string"),
+                '^[-]?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?$',
+                0
+            ) == ""
+
+            invalid_condition = is_blank | is_non_numeric
+            col_casted = col(column).cast("double")
+            col_string = col(column).cast("string")
+
+            # --- Signage Check ---
+            if expectedsignage == 'positive':
+                signage_fail = col_casted < 0
+                remark_fail = concat(lit("Balance not positive: "), col_string)
+            elif expectedsignage == 'negative':
+                signage_fail = col_casted > 0
+                remark_fail = concat(lit("Balance not negative: "), col_string)
+            elif expectedsignage == 'zero':
+                signage_fail = col_casted != 0
+                remark_fail = concat(lit("Balance not zero: "), col_string)
+            else:
+                print(f" [Invalid Signage] Unknown expectedsignage '{expectedsignage}' for ruleid: {rule['id']}")
+                continue
+
+            # --- Pass/Fail Flag ---
+            passfail_col = when(invalid_condition, lit("ERROR")) \
+                           .when(signage_fail, lit("Fail")) \
+                           .otherwise(lit("Pass"))
+
+            # --- Detailed Remarks ---
+            remark_col = when(is_blank,
+                              lit(f"Rule id: {rule['id']} - Error in column '{column}': Value is NULL or blank")
+                             ).when(is_non_numeric,
+                              concat(lit(f"Rule {rule['id']} - Error in column '{column}': Non-numeric value - "), col_string)
+                             ).when(signage_fail, remark_fail) \
+                             .otherwise(lit(""))
+
+            # --- Final Validated DataFrame ---
+            df_validated = filtered_data_df.withColumn("PassFailFlag", passfail_col) \
+                                           .withColumn("Remarks", remark_col) \
+                                           .withColumn("rulesid", lit(str(rule['id']))) \
+                                           .withColumn("odsid", col("id")) \
+                                           .withColumn("Rule", lit(RULE)) \
+                                           .withColumn("AIInsights", lit("")) \
+                                           .withColumn("txnID", lit(TXN_ID)) \
+                                           .withColumn("sheetName", lit(sheet_name))
+
+            reference_df = reference_df.unionByName(df_validated.select(reference_schema))
+
+        except Exception as e:
+            print(f" [Rule Processing Error] Rule ID {rule.get('id', 'unknown')} (column '{column}') in sheet '{sheet}': {str(e)}")
+            continue
+# -------------------- Write output --------------------
 try:
+    reference_df.write.format("delta").mode("overwrite").save(output_path)
+    print(f"\n Validation complete. Results written to: {output_path} with txnID={TXN_ID}")
+except Exception as e:
+    print(f" [Write Error] Failed to write reference_df to Delta: {str(e)}")
+    raise
+
+
+
+
+
+# FINAL GN.18.1.1 SHEET(ONLY)
+
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when, lit, concat, trim, regexp_extract
+
+# -------------------- Spark session --------------------
+try:
+    spark = SparkSession.builder \
+        .appName("ADQFabricLHDev01") \
+        .config("spark.jars.packages", "io.delta:delta-core_2.12:2.4.0") \
+        .getOrCreate()
+except Exception as e:
+    print(f"[Spark Session Error] {str(e)}")
+    raise
+
+# -------------------- Parameters --------------------
+TXN_ID = "MS1_1000001"
+RULE = "RULE 2"
+SHEET_NAME = "GN-18.1.1"
+
+BASE_PATH = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/"
+rules_table = BASE_PATH + "core_financial_signage_mapping"
+data_table_path = BASE_PATH + "ods_gn_18_1_1"
+output_path = BASE_PATH + "ods_reference_gn18"
+
+# -------------------- Load rules --------------------
+try:
+    spark.read.format("delta").load(rules_table).createOrReplaceTempView("rules_view")
+except Exception as e:
+    print(f"[Rules Load Error] {str(e)}")
+    raise
+
+# -------------------- Reference schema --------------------
+try:
+    reference_schema = [
+        "rulesid", "odsid", "Rule", "PassFailFlag", "Remarks",
+        "AIInsights", "txnID", "sheetName"
+    ]
+
+    reference_df = spark.createDataFrame(
+        [],
+        schema="rulesid string, odsid string, Rule string, PassFailFlag string, Remarks string, AIInsights string, txnID string, sheetName string"
+    )
+except Exception as e:
+    print(f"[Reference Schema Error] {str(e)}")
+    raise
+
+# -------------------- Process GN-18.1.1 --------------------
+try:
+    rules_df = spark.sql(f"SELECT * FROM rules_view WHERE sheetname = '{SHEET_NAME}'")
+    spark.read.format("delta").load(data_table_path).createOrReplaceTempView("data_view")
     available_cols = spark.table("data_view").columns
 except Exception as e:
-    print(f" Error accessing data_view columns: {str(e)}")
+    print(f"[Sheet Load Error] {str(e)}")
     raise
 
+# -------------------- Find dynamic row_no for 'Current period' --------------------
+try:
+    current_period_row_df = spark.table("data_view") \
+        .filter((trim(col("fsli")) == "Current period") & (col("txnID") == TXN_ID)) \
+        .select("row_no") \
+        .orderBy("row_no") \
+        .limit(1)
+
+    current_period_row = current_period_row_df.first()
+
+    if not current_period_row:
+        raise Exception(f"[Header Detection Error] No row found with fsli = 'Current period' for txnID = '{TXN_ID}'")
+
+    current_period_row_no = current_period_row["row_no"]
+except Exception as e:
+    print(f"[Header Detection Error] {str(e)}")
+    raise
+
+# -------------------- Rule Processing --------------------
 for rule in rules_df.toLocalIterator():
     column = rule['header']
     try:
         expectedsignage = rule['expectedsignage'].lower()
         fsli = rule['fsli']
-        sheet_name = rule['sheetname']
+        rule_id = rule['id']
 
         if column not in available_cols:
-            raise Exception(f"Column '{column}' not found in data_view")
+            continue
 
+        # -------------------- Filter relevant data --------------------
         filtered_data_df = spark.table("data_view") \
-            .filter((col("fsli") == fsli) & (col("txnID") == TXN_ID))
+            .filter((col("fsli") == fsli) & (col("txnID") == TXN_ID) & (col("row_no") >= current_period_row_no))
 
-        # --- Checks ---
+        if filtered_data_df.rdd.isEmpty():
+            continue
         is_blank = (col(column).isNull()) | (trim(col(column)) == "")
         is_non_numeric = regexp_extract(
             col(column).cast("string"),
@@ -192,53 +383,48 @@ for rule in rules_df.toLocalIterator():
         col_casted = col(column).cast("double")
         col_string = col(column).cast("string")
 
-        # --- Signage check ---
         if expectedsignage == 'positive':
             signage_fail = col_casted < 0
             remark_fail = concat(lit("Balance not positive: "), col_string)
         elif expectedsignage == 'negative':
             signage_fail = col_casted > 0
             remark_fail = concat(lit("Balance not negative: "), col_string)
+        elif expectedsignage == 'zero':
+            signage_fail = col_casted != 0
+            remark_fail = concat(lit("Balance not zero: "), col_string)
         else:
-            print(f" Unknown expectedsignage '{expectedsignage}' for rule {rule['id']}")
             continue
 
-        # --- Pass / Fail / ERROR ---
         passfail_col = when(invalid_condition, lit("ERROR")) \
                        .when(signage_fail, lit("Fail")) \
                        .otherwise(lit("Pass"))
 
-        # --- Remarks with detailed error reasons ---
         remark_col = when(is_blank,
-                          lit(f"Rule id: {rule['id']} - Error in column '{column}': Value is NULL or blank")
+                          lit(f"Rule id: {rule_id} - Error in column '{column}': Value is NULL or blank")
                          ).when(is_non_numeric,
-                          concat(lit(f"Rule id: {rule['id']} - Error in column '{column}': Non-numeric value - "), col_string)
+                          concat(lit(f"Rule {rule_id} - Error in column '{column}': Non-numeric value - "), col_string)
                          ).when(signage_fail, remark_fail) \
                          .otherwise(lit(""))
 
-        # --- Build final validated DataFrame ---
         df_validated = filtered_data_df.withColumn("PassFailFlag", passfail_col) \
                                        .withColumn("Remarks", remark_col) \
-                                       .withColumn("rulesid", lit(str(rule['id']))) \
+                                       .withColumn("rulesid", lit(str(rule_id))) \
                                        .withColumn("odsid", col("id")) \
                                        .withColumn("Rule", lit(RULE)) \
                                        .withColumn("AIInsights", lit("")) \
                                        .withColumn("txnID", lit(TXN_ID)) \
-                                       .withColumn("sheetName", lit(sheet_name))
+                                       .withColumn("sheetName", lit(SHEET_NAME))
 
         reference_df = reference_df.unionByName(df_validated.select(reference_schema))
 
     except Exception as e:
-        print(f" Error processing rule id {rule.get('id', 'unknown')} (column '{column}'): {str(e)}")
+        print(f"[Rule Processing Error] Rule ID {rule.get('id', 'unknown')}: {str(e)}")
         continue
 
 # -------------------- Write output --------------------
 try:
     reference_df.write.format("delta").mode("overwrite").save(output_path)
-    print(f" Validation complete. Results written to: {output_path} with txnID={TXN_ID}")
 except Exception as e:
-    print(f" Error writing reference_df to Delta: {str(e)}")
+    print(f"[Write Error] {str(e)}")
     raise
-
-
 
