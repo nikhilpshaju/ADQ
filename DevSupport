@@ -1,3 +1,26 @@
+
+
+
+
+
+
+
+
+
+
+
+
+# Import the environment utility
+import mssparkutils
+
+# Retrieve the file name passed from the pipeline
+file_name = mssparkutils.env.getEnvironmentVariable("file_name")
+
+# Display the file name
+print(f"Processing file: {file_name}")
+
+
+
 Folder contents:
 An error occurred while retrieving token from XML response: AADSTS53003: Access has been blocked by Conditional Access policies. The access policy does not allow token issuance.
 
