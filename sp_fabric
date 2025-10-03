@@ -1,0 +1,294 @@
+try:      
+    # List of entities to be copied for a given pipeline identifier
+    entities = spark.sql(f"""SELECT * from {env_params["bronze_lakehouse_name"]}.config_ingstn_shrpt 
+                                        WHERE IngestionIdentifier = '{ingestion_identifier}'
+                                                and ActiveFlag = 1 """).collect()
+                                                
+    for entity in entities:
+        file_found = False
+        # get secrets from Key Vault
+        sp_client_id = get_secret_from_key_vault(entity["KeyVaultURL"], entity["KeyVaultClientIDName"])  
+        sp_client_secret = get_secret_from_key_vault(entity["KeyVaultURL"], entity["KeyVaultClientSecretName"]) 
+
+        # get access token
+        access_token = get_graph_access_token(env_params['tenant_id'], sp_client_id, sp_client_secret)
+
+        # initialize the class SharepointUtil
+        sharepoint_utils = SharePoinUtils(access_token)
+
+        # Get Ingestion ID
+        ingestion_id = entity["IngestionID"]
+
+        # Full load extraction
+        if entity["LoadType"].lower() == "full":
+            # list all the files
+            drive_id = entity["DriveID"]
+            entity_path = entity["SourceParentPath"]
+            entity_name = entity["FileName"]
+            # Set the folder path to None or empty string to extract everything from the root
+            if entity_path.lower() == "all":
+                entity_path = ""    
+            file_list = sharepoint_utils.list_files(drive_id, entity_path, entity_name)
+            
+            # Get current timestamp 
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+
+            if len(file_list)>0:
+                # set file_found flag to true
+                file_found = True
+                # Iterate through each file
+                for file in file_list:
+
+                    # Get Content of the file
+                    file_download_url = file["@microsoft.graph.downloadUrl"]
+                    file_content = sharepoint_utils.download_file_content(file_download_url)
+
+                    # Upload file to Fabric
+                    landing_parent_folder = entity["LandingParentFolderName"]
+                    # Check if SourceParentPath is 'all' (i.e., replicate the full folder structure from SharePoint)
+                    if entity['SourceParentPath'].lower() == 'all':
+                        # Use the full folder structure from SharePoint without modifying
+                        folder_relative_path = file['parentReference']['path'].split("root:/")[1]  # Full folder path after 'root:/'
+                        # Prepend the LandingParentFolderName to ensure it's included in the landing structure
+                        folder_relative_path = f"{landing_parent_folder}/{folder_relative_path}".lstrip("/")
+                    else:
+                        # Extract the folder structure in SharePoint after LandingParentFolderName
+                        folder_relative_path = file['parentReference']['path'].split("root:/")[1]  # Original full folder path
+                        landing_folder_position = folder_relative_path.find(landing_parent_folder)
+                
+                        if landing_folder_position != -1:
+                            # Keep only the part of the path starting from LandingParentFolderName
+                            folder_relative_path = folder_relative_path[landing_folder_position:].lstrip("/")
+                        else:
+                            raise ValueError(f"LandingParentFolderName '{landing_parent_folder}' not found in the path '{folder_relative_path}'.")
+
+                    file_name = file['name']
+                    # add timestamp in the filename
+                    file_name_with_timestamp = DateTimeUtils.add_timestamp_to_filename(file_name)
+                    # Construct the file relative path with the new file name
+                    file_relative_path = f"landing/{entity['DomainName'].lower()}/{entity['SourceSystem'].lower()}/{entity['SiteName']}/{entity['DriveName']}/{folder_relative_path}/{file_name_with_timestamp}"
+                    # save file to fabric
+                    # initialize class FabricFileUtils
+                    fabric_file_utils = FabricFileUtils(env_params['workspace_id'], env_params['bronze_lakehouse_id'])
+                    # save to Files
+                    fabric_file_utils.save_to_fabric_files_section(file_relative_path, file_content)
+
+                    # Archive file at source end depending on flag
+                    if entity["SourceArchiveFlag"] == 1:
+                        # Define the SourceArchivePath
+                        archive_path = entity["SourceArchivePath"]
+                        
+                        # Move the file to the archive path in SharePoint
+                        sharepoint_utils.move_file_to_archive(drive_id, entity_path, file_name, archive_path)
+                        
+
+        # Incremental (Delta) load extraction
+        elif entity["LoadType"].lower() == "delta":
+                drive_id = entity["DriveID"]
+                entity_path = entity["SourceParentPath"]
+                # Get the last delta token for this drive and folder
+                last_delta_token = DateTimeUtils.url_encoded_timestamp(entity["LastProcessedTimestamp"])
+
+
+                # Construct the delta URL based on whether it's the full drive or a folder
+                if last_delta_token:
+                    # Use the last delta token to fetch incremental changes
+                    delta_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{entity_path}:/delta?token={last_delta_token}" if entity_path.lower() != 'all' else f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/delta?token={last_delta_token}"
+                else:
+                    # No previous token, run the initial delta query
+                    delta_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{entity_path}:/delta" if entity_path.lower() != 'all' else f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/delta"
+
+                # Call the delta endpoint to get changes
+                delta_response = sharepoint_utils.call_sharepoint("GET", delta_url)
+                delta_files = delta_response.json().get('value', [])
+
+                # Get current timestamp 
+                timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+
+                if len(delta_files)>0:
+                    file_found = True
+                    # Process each changed file
+                    for file in delta_files:
+                        if not file.get('deleted'):
+                            # Get the file content
+                            file_download_url = file["@microsoft.graph.downloadUrl"]
+                            file_content = sharepoint_utils.download_file_content(file_download_url)
+
+                            # Check if SourceParentPath is 'all' (i.e., replicate the full folder structure from SharePoint)
+                            landing_parent_folder = entity["LandingParentFolderName"]
+                            if entity['SourceParentPath'].lower() == 'all':
+                                # Use the full folder structure from SharePoint without modifying
+                                folder_relative_path = file['parentReference']['path'].split("root:/")[1]  # Full folder path after 'root:/'
+                                # Prepend the LandingParentFolderName to ensure it's included in the landing structure
+                                folder_relative_path = f"{landing_parent_folder}/{folder_relative_path}".lstrip("/")
+                            else:
+                                # Extract the folder structure in SharePoint after LandingParentFolderName
+                                folder_relative_path = file['parentReference']['path'].split("root:/")[1]  # Original full folder path
+                                landing_folder_position = folder_relative_path.find(landing_parent_folder)
+
+                                if landing_folder_position != -1:
+                                    # Keep only the part of the path starting from LandingParentFolderName
+                                    folder_relative_path = folder_relative_path[landing_folder_position:].lstrip("/")
+                                else:
+                                    raise ValueError(f"LandingParentFolderName '{landing_parent_folder}' not found in the path '{folder_relative_path}'.")
+
+                            file_name = file['name']
+                            # Add timestamp in the filename
+                            file_name_with_timestamp = DateTimeUtils.add_timestamp_to_filename(file_name)
+                            # Construct the file relative path with the new file name
+                            file_relative_path = f"landing/{entity['DomainName'].lower()}/{entity['SourceSystem'].lower()}/{entity['SiteName']}/{entity['DriveName']}/{folder_relative_path}/{file_name_with_timestamp}"
+                            # save file to fabric
+                            # initialize class FabricFileUtils
+                            fabric_file_utils = FabricFileUtils(env_params['workspace_id'], env_params['bronze_lakehouse_id'])
+                            # save to Files
+                            fabric_file_utils.save_to_fabric_files_section(file_relative_path, file_content)
+
+        else:
+            raise ValueError("Invalid LoadType in config table")
+
+        # Update LastProcessedTimestamp in config table. Tho this wont be used in case of full load but this is for information
+        execute_with_retry(f"""UPDATE {env_params["bronze_lakehouse_name"]}.config_ingstn_shrpt
+                SET LastProcessedTimestamp = CURRENT_TIMESTAMP
+                WHERE IngestionID = {ingestion_id}
+                """)
+         # Update the initialized log with success
+    NotebookLogger.log_end(
+                    spark,
+                    notebook_name=notebook_name,
+                    start_time=start_time,
+                    status="Success"
+                    )
+
+except Exception as e:
+    # Update the initialized log with failure
+    NotebookLogger.log_end(
+                    spark,
+                    notebook_name=notebook_name,
+                    start_time=start_time,
+                    status="Fail",
+                    error_message=e
+                    )   
+    raise
+
+class FabricFileUtils:
+    def __init__(self, workspace_id, lakehouse_id):
+        self.workspace_id = workspace_id
+        self.lakehouse_id = lakehouse_id
+    
+    #Get folder full path for Json response which create multiple files
+    def get_folder_full_path(self, folder_relative_path):
+        folder_full_path = f"abfss://{self.workspace_id}@onelake.dfs.fabric.microsoft.com/{self.lakehouse_id}/Files/{folder_relative_path}"
+        return folder_full_path
+
+    # Get all files from a folder
+    def list_all_files_recursive(self, folder_relative_path):
+        all_files = []
+        
+        # Construct the full path for the file in the Files section
+        folder_full_path = f"abfss://{self.workspace_id}@onelake.dfs.fabric.microsoft.com/{self.lakehouse_id}/Files/{folder_relative_path}"
+
+        # List the contents of the current directory
+        files_and_dirs = notebookutils.fs.ls(folder_full_path)
+        
+        for item in files_and_dirs:
+            if item.isDir:
+                # Construct relative path for the subdirectory
+                subfolder_relative_path = f"{folder_relative_path}/{item.name}"
+                # If the item is a directory, recursively list the files inside it
+                all_files += self.list_all_files_recursive(subfolder_relative_path)
+            else:
+                # If the item is a file, add the row object to the list
+                all_files.append(item)
+        
+        return all_files
+
+    
+    
+    # Function to write a file content to Files section of Fabric
+    def save_to_fabric_files_section(self, file_relative_path, file_content):
+        try:
+            # Construct the full path for the file in the Files section
+            file_full_path = f"abfss://{self.workspace_id}@onelake.dfs.fabric.microsoft.com/{self.lakehouse_id}/Files/{file_relative_path}"
+            
+            # Write the file content to a temporary local path first
+            temp_file_path = f"/tmp/temp_file"
+            # Ensure the parent directories exist
+            os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
+            with open(temp_file_path, "wb") as temp_file:
+                if isinstance(file_content, dict):
+                    temp_file.write(json.dumps(file_content, indent=2).encode("utf-8"))  # Convert dict to JSON
+                elif isinstance(file_content, str):
+                    temp_file.write(file_content.encode("utf-8"))  # Encode string
+                else:
+                    temp_file.write(file_content)  # If already bytes
+            
+            # Copy the file from the local path to the Files section in Fabric
+            notebookutils.fs.cp(f"file:{temp_file_path}", file_full_path)
+        
+        except Exception as e:
+            # Raise the exception if any error occurs
+            raise e
+    def move_file_source_to_destination(self, source_file_relative_path: str, destination_file_relative_path: str) -> None:
+        try:
+            source_path = f"abfss://{self.workspace_id}@onelake.dfs.fabric.microsoft.com/{self.lakehouse_id}/Files/{source_file_relative_path}"
+            destination_path = f"abfss://{self.workspace_id}@onelake.dfs.fabric.microsoft.com/{self.lakehouse_id}/Files/{destination_file_relative_path}"
+            notebookutils.fs.mv(source_path, destination_path,True)
+            logging.info(f"Successfully moved files from '{source_path}' to '{destination_path}'.")
+        except Exception as e:
+            logging.error(f"Error moving files to archive: {e}")
+            raise ValueError(f"Error moving files to archive: {e}")
+
+
+    # def remove_existing_files_in_folder(self, folder_relative_path: str) -> None:
+    #     try:
+    #         # Construct the full folder path
+    #         folder_path = f"abfss://{self.workspace_id}@onelake.dfs.fabric.microsoft.com/{self.lakehouse_id}/Files/{folder_relative_path}"
+
+    #         # List all files in the folder
+    #         files_in_folder = notebookutils.fs.ls(folder_path)
+
+    #         # Iterate through all files and remove them
+    #         for file_info in files_in_folder:
+    #             if file_info['isDir'] == False:  # Check if it's a file and not a folder
+    #                 file_path = file_info['path']
+    #                 notebookutils.fs.rm(file_path)
+    #                 logging.info(f"Successfully removed file: {file_path}")
+
+    #         # If no files were found, log a warning
+    #         if not files_in_folder:
+    #             logging.warning(f"No files found in the folder '{folder_path}'.")
+
+    #     except Exception as e:
+    #         logging.error(f"Error removing files: {e}")
+    #         raise ValueError(f"Error removing files: {e}")
+
+    def remove_existing_files_in_folder(self, folder_relative_path: str) -> None:
+        try:
+            # Construct the full folder path
+            folder_path = f"abfss://{self.workspace_id}@onelake.dfs.fabric.microsoft.com/{self.lakehouse_id}/Files/{folder_relative_path}"
+    
+            # Check if the folder exists before attempting to list the files
+            if not notebookutils.fs.exists(folder_path):
+                logging.warning(f"The folder '{folder_path}' does not exist.")
+                return  # Exit early if folder doesn't exist
+    
+            # List all files in the folder
+            files_in_folder = notebookutils.fs.ls(folder_path)
+
+            if len(files_in_folder) > 0 :
+                for file in files_in_folder:
+                    try:
+                        file_path=file.path
+                        notebookutils.fs.rm(file.path)  # Assuming `file.path` gives the full path to the file
+                        logging.info(f"Removed: {file.path}")
+                    except Exception as e:
+                            # If the file doesn't exist or any other error occurs
+                        logging.info(f"File not found or failed to delete: {file_path}. Error: {e}")
+            else:
+                logging.info(f"No File to delete in : {folder_path}")
+    
+        except Exception as e:
+            logging.error(f"Error removing files: {e}")
+            raise ValueError(f"Error removing files: {e}")
