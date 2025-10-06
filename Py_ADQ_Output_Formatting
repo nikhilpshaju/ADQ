@@ -457,3 +457,236 @@ for sheet_name, cols in custom_deletions.items():
 
 print("Applied successfully.")
 wb.save(file_path)
+
+
+
+
+
+
+### Latest code
+
+
+
+import re
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter,column_index_from_string
+
+file_path = "Outlinkbroken (14) (1) - Copy.xlsx"
+wb = load_workbook(file_path)
+
+# Sheets to process
+sheets_to_process = [s for s in wb.sheetnames if s.lower().startswith("output - rule")]
+
+# Styles
+header_fill = PatternFill(start_color="151B54", end_color="151B54", fill_type="solid")
+header_font = Font(bold=True, color="FFFFFF")
+pattern_fill = PatternFill(start_color="ECECEC", end_color="ECECEC", fill_type="solid")
+pattern_font = Font(bold=True, color="000000")
+green_fill = PatternFill(start_color="93DC5C", end_color="93DC5C", fill_type="solid")
+red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+soft_delete_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+soft_delete_font = Font(color="FFFFFF", italic=True)
+thin_border = Border(
+    left=Side(style="thin"),
+    right=Side(style="thin"),
+    top=Side(style="thin"),
+    bottom=Side(style="thin")
+)
+
+sr_regex = re.compile(r"\bsr\.?\s*no\.?\b", re.I)
+
+def normalize_header_text(s):
+    return re.sub(r"[^A-Za-z0-9]", "", str(s or "")).lower()
+
+def soft_delete_cell(cell):
+    cell.fill = soft_delete_fill
+    cell.font = soft_delete_font
+
+for sheet_name in sheets_to_process:
+    ws = wb[sheet_name]
+    print(f"Processing sheet: {ws.title}")
+    ws.sheet_view.showGridLines = False
+
+    # Find last used row and column
+    last_row = 0
+    last_col = 0
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value not in (None, ""):
+                last_row = max(last_row, cell.row)
+                last_col = max(last_col, cell.column)
+
+    # Hide unused columns and rows
+    for col in range(last_col + 1, ws.max_column + 1):
+        ws.column_dimensions[get_column_letter(col)].hidden = True
+    for r in range(last_row + 1, ws.max_row + 1):
+        ws.row_dimensions[r].hidden = True
+    try:
+        for r in [2, 3, 4]:
+            if r <= ws.max_row:
+                for cell in ws[r]:
+                    cell.font = Font(bold=True, size=25)
+        if 6 <= ws.max_row:
+            for cell in ws[6]:
+                cell.font = Font(bold=True)
+    except Exception as e:
+        print(f"Row-formatting skipped/failed for {sheet_name}: {e}")
+
+    row = 1
+    while row <= last_row:
+        raw_texts = [str(c.value).strip() if c.value else "" for c in ws[row]]
+        header_norms = [normalize_header_text(txt) for txt in raw_texts]
+
+        # Detect SR No row
+        sr_col_idx = next((idx for idx, txt in enumerate(raw_texts) if txt and sr_regex.search(txt)), None)
+        if sr_col_idx is not None:
+            pattern_row_idx = row - 1
+
+            # Identify helper columns
+            helper_cols = {name: header_norms.index(name) for name in ["rownumber", "cellnumber", "sheetname"] if name in header_norms}
+
+            # Pattern row formatting (excluding helper columns)
+            first_helper_col = min(helper_cols.values()) if helper_cols else len(header_norms)
+            for idx, cell in enumerate(ws[pattern_row_idx][1:], start=1):
+                if idx >= first_helper_col:
+                    break
+                cell.fill = pattern_fill
+                cell.font = pattern_font
+                left = Side(style="medium") if idx == 1 else Side(style=None)
+                right = Side(style="medium") if idx == first_helper_col - 1 else Side(style=None)
+                cell.border = Border(top=Side(style="medium"), bottom=Side(style="medium"), left=left, right=right)
+
+            # Header row formatting
+            for idx, cell in enumerate(ws[row][1:], start=1):
+                if idx in helper_cols.values():
+                    continue
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = thin_border
+
+            # Soft-delete header helper cells
+            for helper_col in helper_cols.values():
+                if helper_col < len(ws[row]):
+                    soft_delete_cell(ws[row][helper_col])
+
+            # Hyperlink-related helper columns
+            link_col_index = helper_cols.get("rownumber") or helper_cols.get("cellnumber")
+            header_type = "rownumber" if "rownumber" in helper_cols else "cellnumber" if "cellnumber" in helper_cols else None
+            sheetname_col_index = helper_cols.get("sheetname")
+            note_col_idx = header_norms.index("notename") if "notename" in header_norms else None
+
+            # Process data rows for this table
+            data_idx = row + 1
+            while data_idx <= last_row:
+                data_row = ws[data_idx]
+                if all((c.value is None or str(c.value).strip() == "") for c in data_row):
+                    break
+
+                # Apply border only to non-helper columns
+                for idx, c in enumerate(data_row[1:], start=1):
+                    if idx not in helper_cols.values():
+                        c.border = thin_border
+
+                header_texts = [normalize_header_text(c.value) for c in ws[row]]
+
+                for idx, c in enumerate(data_row[1:], start=1):
+                    if idx not in helper_cols.values():
+                        c.border = thin_border
+
+                # Conditional formatting for currentperiod and validationstatus
+                cp_idx = vs_idx = None
+                if "currentperiod" in header_texts:
+                    cp_idx = header_texts.index("currentperiod")
+                if "validationstatus" in header_texts:
+                    vs_idx = header_texts.index("validationstatus")
+
+                if cp_idx is not None and data_row[cp_idx].value:
+                    val = str(data_row[cp_idx].value).strip().lower()
+                    if val in ["pass", "tb validated"]:
+                        data_row[cp_idx].fill = green_fill
+                    elif val == "fail":
+                        data_row[cp_idx].fill = red_fill
+
+                if vs_idx is not None and data_row[vs_idx].value:
+                    val = str(data_row[vs_idx].value).strip().lower()
+                    if val in ["pass", "tb validated"]:
+                        data_row[vs_idx].fill = green_fill
+                    elif val == "fail":
+                        data_row[vs_idx].fill = red_fill
+                # Hyperlink logic
+                if note_col_idx is not None and link_col_index is not None and sheetname_col_index is not None:
+                    link_target_cell = data_row[note_col_idx]
+                    link_cell_value = ws.cell(row=data_idx, column=link_col_index + 1).value
+                    sheetname_value = ws.cell(row=data_idx, column=sheetname_col_index + 1).value
+
+                    if link_target_cell and link_target_cell.value and link_cell_value and sheetname_value:
+                        safe_sheet_name = str(sheetname_value).strip()
+                        if any(ch in safe_sheet_name for ch in [" ", "-", "."]):
+                            safe_sheet_name = f"'{safe_sheet_name}'"
+                        try:
+                            if header_type == "rownumber":
+                                target_number = int(link_cell_value)
+                                target_cell = f"{safe_sheet_name}!A{target_number}:Z{target_number}"
+                            elif header_type == "cellnumber":
+                                cell_ref = str(link_cell_value).upper().strip()
+                                target_cell = f"{safe_sheet_name}!{cell_ref}"
+                            else:
+                                target_cell = None
+
+                            if target_cell:
+                                link_target_cell.hyperlink = f"#{target_cell}"
+                                link_target_cell.font = Font(color="0000FF", underline="single")
+                                print(f"{sheet_name}: Linked '{link_target_cell.value}' â†’ {target_cell}")
+                        except ValueError:
+                            pass
+
+                # Soft-delete helper columns in data row
+                for helper_col in helper_cols.values():
+                    if helper_col < len(data_row):
+                        soft_delete_cell(data_row[helper_col])
+
+                data_idx += 1
+
+            row = data_idx + 1
+            continue
+
+        row += 1
+
+    # Autofit columns
+    for col in ws.columns:
+        try:
+            max_length = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                if cell.value is not None:
+                    max_length = max(max_length, len(str(cell.value)) + 1)
+            ws.column_dimensions[col_letter].width = max(1, max_length)
+        except Exception:
+            pass
+
+    try:
+        ws.column_dimensions["A"].width = 2
+        ws.column_dimensions["B"].width = 6
+    except Exception:
+        pass
+# Custom deletion for output - rule 2
+custom_deletions = {
+    "Output - Rule 1": ["H"], 
+    "Output - Rule 2": ["I", "J"],  
+}
+
+for sheet_name, cols in custom_deletions.items():
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        col_nums = sorted([column_index_from_string(c) for c in cols], reverse=True)
+        for col_idx in col_nums:
+            try:
+                ws.delete_cols(col_idx)
+                print(f"{sheet_name}: Deleted custom column {col_idx}")
+            except Exception as e:
+                print(f"{sheet_name}: Failed to delete column {col_idx}: {e}")
+
+print("Applied successfully.")
+wb.save(file_path)
