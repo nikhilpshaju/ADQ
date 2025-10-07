@@ -1,3 +1,31 @@
+def move_file_within_onelake(workspace_id, lakehouse_id, source_relative_path, dest_relative_path, access_token):
+    """
+    Moves a file from one folder to another within Fabric OneLake Files using the DFS REST API.
+    Args:
+        workspace_id (str): The Fabric workspace ID.
+        lakehouse_id (str): The Lakehouse ID.
+        source_relative_path (str): The current path (including filename) under Files.
+        dest_relative_path (str): The destination path (including filename) under Files.
+        access_token (str): Azure AD access token for https://onelake.dfs.fabric.microsoft.com/.default
+    Returns:
+        bool: True if move succeeded, False otherwise.
+    """
+    base_url = f"https://onelake.dfs.fabric.microsoft.com/{workspace_id}/{lakehouse_id}/Files"
+    source_url = f"{base_url}/{source_relative_path}"
+    dest_url = f"{base_url}/{dest_relative_path}"
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'x-ms-version': '2023-11-03',
+        'x-ms-rename-source': f"/{workspace_id}/{lakehouse_id}/Files/{source_relative_path}",
+        'x-ms-rename-mode': 'move'
+    }
+    response = requests.put(dest_url, headers=headers)
+    if response.status_code in (200, 201):
+        print(f"Moved file from '{source_relative_path}' to '{dest_relative_path}' successfully.")
+        return True
+    else:
+        print(f"Failed to move file: {response.status_code} - {response.text}")
+        return False
 
 
 
