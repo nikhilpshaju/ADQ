@@ -1,3 +1,28 @@
+
+
+    def get_sharepoint_list_items(self, list_name):
+        self._ensure_valid_token()
+        url = f"{self.graph_api_url}/sites/{self.site_id}/lists/{list_name}/items?expand=fields"
+        print(f"Requesting SharePoint list items from: {url}")
+        response = requests.get(url, headers=self.headers)
+        print(f"Response status: {response.status_code}")
+        print(f"Response text: {response.text}")
+        if response.status_code == 200:
+            items = response.json().get("value", [])
+            print(f"Fetched {len(items)} items from the list.")
+            return [item['fields'] for item in items]
+        else:
+            print(f"Failed to retrieve list items: {response.status_code} - {response.text}")
+            return []
+
+
+list_items = repo.get_sharepoint_list_items("Vyaya Support Agent List")
+for item in list_items:
+    print(item)
+
+
+
+
 def move_file_within_onelake(workspace_id, lakehouse_id, source_relative_path, dest_relative_path, access_token):
     """
     Moves a file from one folder to another within Fabric OneLake Files using the DFS REST API.
