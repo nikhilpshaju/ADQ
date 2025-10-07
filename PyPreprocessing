@@ -793,6 +793,32 @@ col_ref_sheet.cell(row=136, column=4, value="Others")
 # If loop completes without exiting
 print("Validated successfully")
 
+    # Add new column "original_column_alphabet" at position 3
+    col_ref_sheet = final_wb["Column_Reference"]
+    col_ref_sheet.insert_cols(3)
+    col_ref_sheet.cell(row=1, column=3, value="original_column_alphabet")
+ 
+    # Fill the new column for all rows
+    for row in range(2, col_ref_sheet.max_row + 1):
+        col_number = col_ref_sheet.cell(
+            row=row, column=2
+        ).value  
+        if isinstance(col_number, int):
+            col_ref_sheet.cell(row=row, column=3, value=get_column_letter(col_number))
+        else:
+            col_ref_sheet.cell(
+                row=row, column=3, value=""
+            )  
+ 
+    print("Validated successfully")
+    final_wb.save(output_file)
+    print(f"Milestone 1 output saved: {output_file}")
+
+
+
+
+
+
 # --- Save workbook ---
 final_wb.save(output_file)
 print(f" Saved as: {output_file}")
