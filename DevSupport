@@ -1,4 +1,26 @@
+def list_all_sharepoint_lists(self):
+        """
+        Lists all SharePoint lists in the current site using Microsoft Graph API.
+        Returns:
+            list: List of dicts with list names and IDs.
+        """
+        self._ensure_valid_token()
+        url = f"{self.graph_api_url}/sites/{self.site_id}/lists"
+        print(f"Requesting all SharePoint lists from: {url}")
+        response = requests.get(url, headers=self.headers)
+        print(f"Response status: {response.status_code}")
+        print(f"Response text: {response.text}")
+        if response.status_code == 200:
+            items = response.json().get("value", [])
+            for item in items:
+                print(f"List Name: {item.get('name')}, ID: {item.get('id')}")
+            return items
+        else:
+            print(f"Failed to retrieve lists: {response.status_code} - {response.text}")
+            return []
 
+
+repo.list_all_sharepoint_lists()
 
     def get_sharepoint_list_items(self, list_name):
         self._ensure_valid_token()
