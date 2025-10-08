@@ -1,0 +1,825 @@
+#Importing packages
+import os
+import re
+import unicodedata
+from openpyxl import load_workbook, Workbook
+from openpyxl.utils import range_boundaries, get_column_letter
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.cell.cell import MergedCell
+from copy import copy
+
+
+#Latest code with MS1/MS2 switch
+milestone = [1,2]  
+
+input_file = r"C:\Users\LR667JH\OneDrive - EY\Desktop\new\ADQ_Smartview based Package_Review Reports_PROD_16.xlsx"
+output_file = "MS1Output.xlsx"
+
+def run_milestone1():
+  
+    if not os.path.exists(input_file):
+        print(f"File not found: {input_file}")
+        exit()
+
+    workbook = load_workbook(input_file, data_only=True)
+    print("Loading workbook.......")
+    
+    RESERVED = {"select", "from", "where", "table"}  # extend if needed
+    
+    def _clean_token(s: str) -> str:
+        t = unicodedata.normalize("NFKD", str(s or ""))
+        t = re.sub(r"%+", "pc_", t).strip("_")
+        t = t.strip().lower().lstrip("\ufeff")
+        t = re.sub(r"[^\w]+", "_", t)
+        t = re.sub(r"__+", "_", t).strip("_")
+        if not t:
+            t = "col"
+        if re.match(r"^\d", t):
+            t = f"c_{t}"
+        if t in RESERVED:
+            t = f"{t}_"
+        return t
+
+    # --- INDEX sheet: Unmerge cells ---
+    if "Index" in workbook.sheetnames:
+        sheet = workbook["Index"]
+        merged_ranges = list(sheet.merged_cells.ranges)
+        for merged_range in merged_ranges:
+            min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
+            value = sheet.cell(row=min_row, column=min_col).value
+            sheet.unmerge_cells(str(merged_range))
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    sheet.cell(row=row, column=col).value = value
+    else:
+        print("Sheet 'Index' not found.")
+
+    # --- Process all sheets for hyperlinks, N/A, etc. ---
+    for sheetname in workbook.sheetnames:
+        ws = workbook[sheetname]
+        col_index_map = {}
+        new_col = ws.max_column + 1
+
+        for col in range(1, ws.max_column + 1):
+            header = ws.cell(row=5, column=col).value or f"Column_{get_column_letter(col)}"
+            col_cells = list(ws.iter_cols(min_col=col, max_col=col, min_row=2, max_row=ws.max_row))[0]
+
+            if any((c.hyperlink or (isinstance(c.value, str) and c.value.strip().startswith("=HYPERLINK("))) for c in col_cells):
+                col_index_map[col] = new_col
+                ws.cell(row=5, column=new_col).value = f"{header} - Location"
+                ws.cell(row=5, column=new_col + 1).value = f"{header} - Text"
+                new_col += 2
+
+        for row in range(2, ws.max_row + 1):
+            for col, loc_col in col_index_map.items():
+                cell = ws.cell(row=row, column=col)
+                cell_val_str = str(cell.value).strip() if cell.value is not None else ""
+
+                if cell_val_str.upper() == "N/A":
+                    ws.cell(row=row, column=loc_col, value="N/A")
+                    ws.cell(row=row, column=loc_col + 1, value="N/A")
+                    continue
+
+                if cell.hyperlink:
+                    ws.cell(row=row, column=loc_col, value=cell.hyperlink.location or "")
+                    ws.cell(row=row, column=loc_col + 1, value=f"{cell.value or ''}")
+
+                elif cell_val_str.startswith("=HYPERLINK("):
+                    try:
+                        content = cell_val_str[12:-1]
+                        link, text = [p.strip().strip('"') for p in content.split(",", 1)]
+
+                        if link.upper() == "N/A" or text.upper() == "N/A":
+                            ws.cell(row=row, column=loc_col, value="N/A")
+                            ws.cell(row=row, column=loc_col + 1, value="N/A")
+                        else:
+                            ws.cell(row=row, column=loc_col, value=link)
+                            ws.cell(row=row, column=loc_col + 1, value=text)
+                    except:
+                        pass
+
+    # --- Sr.No and Note No. location matching in Index sheet ---
+    if "Index" in workbook.sheetnames:
+        ws_index = workbook["Index"]
+
+        sr_no_col = None
+        note_no_col = None
+        for col in range(1, ws_index.max_column + 1):
+            header_val = str(ws_index.cell(row=5, column=col).value).strip().lower() if ws_index.cell(row=5, column=col).value else ""
+            if header_val == "sr.no":
+                sr_no_col = col
+            elif header_val in ("note no.", "note no"):
+                note_no_col = col
+
+        if sr_no_col and note_no_col:
+            serial = 1
+            prev_note = None
+            note_location_map = {}
+
+            note_loc_col = None
+            for col in range(1, ws_index.max_column + 1):
+                if str(ws_index.cell(row=5, column=col).value).strip().lower() == "note no. - location":
+                    note_loc_col = col
+                    break
+            if not note_loc_col:
+                note_loc_col = ws_index.max_column + 1
+                ws_index.cell(row=5, column=note_loc_col).value = "Note no. - Location"
+
+            for row in range(6, ws_index.max_row + 1):
+                current_note = str(ws_index.cell(row=row, column=note_no_col).value).strip() if ws_index.cell(row=row, column=note_no_col).value else ""
+
+                if current_note.upper() == "N/A":
+                    ws_index.cell(row=row, column=note_loc_col).value = "N/A"
+                    ws_index.cell(row=row, column=sr_no_col).value = ""
+                    continue
+
+                if current_note:
+                    if current_note in note_location_map:
+                        ws_index.cell(row=row, column=note_loc_col).value = note_location_map[current_note]
+                    else:
+                        location_value = ws_index.cell(row=row, column=note_loc_col).value
+                        if location_value:
+                            note_location_map[current_note] = location_value
+
+                if current_note != prev_note and current_note != "":
+                    serial += 1 if prev_note is not None else 0
+                    prev_note = current_note
+                ws_index.cell(row=row, column=sr_no_col).value = serial
+
+            print("Location data filled for unmerged cells")
+        else:
+            print("'Sr.No' or 'Note No.' column not found in Index sheet.")
+
+    # --- Validations sheet processing ---
+    if "Validations" in workbook.sheetnames:
+        sheet = workbook["Validations"]
+        max_col = sheet.max_column + 1
+        sheet.cell(row=7, column=max_col).value = "Section"
+        current_section = "Section A : Inter notes Validations"
+
+        for row in range(8, sheet.max_row + 1):
+            row_values = [
+                sheet.cell(row=row, column=col).value
+                for col in range(1, max_col)
+                if sheet.cell(row=row, column=col).value not in (None, "")
+            ]
+            if len(row_values) == 1 and isinstance(row_values[0], str) and row_values[0].strip().lower().startswith("section"):
+                current_section = row_values[0].strip()
+            elif current_section and row_values:
+                sheet.cell(row=row, column=max_col).value = current_section
+    else:
+        print("Sheet 'Validations' not found.")
+
+    # --- Add Row No columns where missing ---
+    sheets_to_update = ['Index', 'Entity TB', 'Validations', 'SoFP - Commentary', 'SoPL - Commentary', 'SoFP', 'SoPL',
+                        'GN-18.1.1', 'CF Review form', 'GN-28', 'SOCIE', 'GN-17.3']
+
+    for sheet_name in sheets_to_update:
+        if sheet_name not in workbook.sheetnames:
+            print(f'Sheet "{sheet_name}" not found in workbook.')
+            continue
+
+        ws = workbook[sheet_name]
+
+        # Clear cells with '#REF!'
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str) and '#REF!' in cell.value:
+                    cell.value = None
+
+        target_row = 1
+        if sheet_name == "Index":
+            for row in ws.iter_rows(min_row=1, max_row=20):
+                for cell in row:
+                    if str(cell.value).strip().lower() == "sr.no":
+                        target_row = cell.row
+                        break
+                else:
+                    continue
+                break
+        elif sheet_name == "Entity TB":
+            for row in ws.iter_rows(min_row=1, max_row=50):
+                for cell in row:
+                    if str(cell.value).strip().lower() == "accounts":
+                        target_row = cell.row
+                        break
+                else:
+                    continue
+                break
+        elif sheet_name == "Validations":
+            for row in ws.iter_rows(min_row=1, max_row=50):
+                for cell in row:
+                    if str(cell.value).strip().lower() == "amount":
+                        target_row = cell.row
+                        break
+                else:
+                    continue
+                break
+
+
+        row_no_col = None
+        for col in range(1, ws.max_column + 1):
+            cell_value = ws.cell(row=target_row, column=col).value
+            if str(cell_value).strip().lower() == "row no":
+                row_no_col = col
+                print(f'"Row No" already exists in "{sheet_name}". Skipping...')
+                break
+
+        if row_no_col:
+            continue
+
+        insert_col = ws.max_column + 1
+        while ws.cell(row=target_row, column=insert_col).value is not None:
+            insert_col += 1
+
+        ws.cell(row=target_row, column=insert_col, value="Row_No")
+
+        if sheet_name == "Validations":
+            section_col = None
+            for col in range(1, ws.max_column + 1):
+                if str(ws.cell(row=target_row, column=col).value).strip().lower() == "section":
+                    section_col = col
+                    break
+
+            if section_col:
+                rows_to_fill = [
+                    row for row in range(target_row + 1, ws.max_row + 1)
+                    if ws.cell(row=row, column=section_col).value not in (None, "")
+                ]
+            else:
+                rows_to_fill = range(target_row + 1, ws.max_row + 1)
+        else:
+            rows_to_fill = range(target_row + 1, ws.max_row + 1)
+
+        for row in rows_to_fill:
+            cell = ws.cell(row=row, column=insert_col)
+            if isinstance(cell, MergedCell):
+                continue
+            cell.value = row
+
+    # --- 2. Sheet-specific transformations for other _NEW sheets ---
+    sheets_to_copy = {
+        "Index": "Index_NEW",
+        "SoPL - Commentary": "SoPL - Commentary_NEW",
+        "SoFP - Commentary": "SoFP - Commentary_NEW",
+        "Entity TB": "Entity TB_NEW",
+        "Validations": "Validations_NEW",
+        "GN-18.1.1": "GN-18.1.1_NEW",
+        "CF Review form": "CF Review form_NEW",
+        "GN-28": "GN-28_NEW",
+        "SOCIE": "SOCIE_NEW",
+        "GN-17.3": "GN-17.3_NEW"
+    }
+
+    missing_sheets = [s for s in sheets_to_copy.keys() if s not in workbook.sheetnames]
+
+    if missing_sheets:
+        print(" Missing sheets:", ", ".join(missing_sheets))
+        import sys
+        sys.exit(1)
+
+    for original_name, new_name in sheets_to_copy.items():
+        if original_name not in workbook.sheetnames:
+            continue
+
+        source_sheet = workbook[original_name]
+        if new_name in workbook.sheetnames:
+            workbook.remove(workbook[new_name])
+
+        new_sheet = workbook.create_sheet(title=new_name, index=0)
+
+        # Copy values only
+        for row in source_sheet.iter_rows():
+            for cell in row:
+                new_sheet.cell(row=cell.row, column=cell.column, value=cell.value)
+
+        # --- Apply sheet-specific deletions and header edits ---
+        if new_name in ["SoPL - Commentary_NEW", "SoFP - Commentary_NEW"]:
+            new_sheet.delete_rows(6, 8)
+            new_sheet.delete_rows(1, 4)
+            new_sheet.cell(row=1, column=1, value="FSLI")
+            new_sheet.cell(row=1, column=10, value="Row_No")
+            new_sheet.cell(row=1, column=2, value="Current_Period")
+            new_sheet.cell(row=1, column=3, value="Prior_Period")
+            new_sheet.cell(row=1, column=8, value="Intercompany_Entities_Commentary")
+            new_sheet.cell(row=1, column=9, value="No_Intercompany_Commentary")
+
+        elif new_name == "Entity TB_NEW":
+            new_sheet.delete_rows(1, 2)
+            new_sheet.delete_cols(1)
+            new_sheet.delete_cols(4)
+            new_sheet.cell(row=1, column=2, value="Description")
+            source_sheet = workbook["Entity TB"]
+            value_to_copy = source_sheet["B2"].value
+
+        elif new_name == "Index_NEW":
+            new_sheet.delete_rows(1, 4)
+            new_sheet.delete_cols(1)
+            for col in range(13, 8, -1):
+                new_sheet.delete_cols(col)
+            new_sheet.delete_cols(10)
+
+        elif new_name == "Validations_NEW":
+            new_sheet.delete_rows(1, 6)
+            new_sheet.delete_rows(67, 4)
+            new_sheet.delete_rows(92, 5)
+            new_sheet.delete_rows(108, 6)
+            new_sheet.delete_cols(13, 4)
+            new_sheet.delete_cols(1)
+            headers = [
+                "Note_No", "FSLI", "Current_amount_1", "Current_amount_2", "Current_difference",
+                "Current_validation", "Prior_amount_1", "Prior_amount_2", "Prior_difference",
+                "Prior_validation", "Description"
+            ]
+            for col, val in enumerate(headers, start=1):
+                new_sheet.cell(row=1, column=col, value=val)
+
+        elif new_name == "GN-18.1.1_NEW":
+            new_sheet.delete_cols(2, 12)
+            new_sheet.cell(row=1, column=1, value="FSLI")
+
+        elif new_name == "CF Review form_NEW":
+            new_sheet.delete_rows(1)
+            new_sheet.delete_cols(2)
+            new_sheet.cell(row=1, column=1, value="FSLI")
+            new_sheet.cell(row=1, column=2, value="Current_Period")
+            new_sheet.cell(row=1, column=3, value="Prior_Period")
+            new_sheet.cell(row=1, column=4, value="Difference")
+            new_sheet.cell(row=1, column=5, value="%Change")
+            new_sheet.cell(row=1, column=6, value="commentary")
+            new_sheet.cell(row=1, column=7, value="Row_No")
+
+        elif new_name == "GN-28_NEW":
+            new_sheet.delete_rows(1, 12)
+            new_sheet.cell(row=1, column=2, value="Current_Period")
+            new_sheet.cell(row=1, column=3, value="Prior_Period")
+            new_sheet.cell(row=1, column=4, value="Difference")
+            new_sheet.cell(row=1, column=5, value="%Change")
+            new_sheet.cell(row=1, column=6, value="Current_Period_Commentary")
+            new_sheet.cell(row=1, column=1, value="FSLI")
+            new_sheet.cell(row=1, column=7, value="Row_No")
+
+        elif new_name == "GN-17.3_NEW":
+            new_sheet.delete_cols(24, 3)
+            new_sheet.delete_cols(19, 3)
+            new_sheet.delete_cols(13, 3)
+            new_sheet.delete_cols(8, 3)
+            new_sheet.delete_cols(5, 2)
+            new_sheet.delete_cols(1, 3)
+            # new_sheet.cell(row=1, column=18, value="row_no")
+            max_col = new_sheet.max_column
+            for col in range(2, max_col + 1):
+                for row in range(1, new_sheet.max_row + 1):
+                    val = new_sheet.cell(row=row, column=col).value
+                    if val is not None and str(val).strip() != "":
+                        new_sheet.cell(row=1, column=col, value=val)
+                        break
+            new_sheet.cell(row=1, column=1, value="FSLI")
+            for col in range(2,6):
+                val = new_sheet.cell(row=1, column=col).value
+                if val:
+                    new_sheet.cell(row=1, column=col, value=f"{val}_Current_Period_Actual")
+            for col in range(7,11):
+                val = new_sheet.cell(row=1, column=col).value
+                if val:
+                    new_sheet.cell(row=1, column=col, value=f"{val}_Prior_Period_Actual")
+        elif new_name == "SOCIE_NEW":
+            new_sheet.delete_cols(2, 4)
+            max_col = new_sheet.max_column
+            for col in range(2, max_col + 1):
+                for row in range(1, new_sheet.max_row + 1):
+                    val = new_sheet.cell(row=row, column=col).value
+                    if val is not None and str(val).strip() != "":
+                        new_sheet.cell(row=1, column=col, value=val)
+                        break
+            new_sheet.delete_rows(2, 8)
+            new_sheet.cell(row=1, column=1, value="FSLI")
+            for col in range(2, 11):
+                val = new_sheet.cell(row=1, column=col).value
+                if val:
+                    new_sheet.cell(row=1, column=col, value=f"{val}_Current_Period_Actual")
+            for col in range(11, 22):
+                val = new_sheet.cell(row=1, column=col).value
+                if val:
+                    new_sheet.cell(row=1, column=col, value=f"{val}_Prior_Period_Actual")
+            for col in range(22,41):
+                val = new_sheet.cell(row=1, column=col).value
+                if val:
+                    new_sheet.cell(row=1, column=col, value=f"{val}_Current_Period_Actual")
+
+    # --- 3. Global header cleanup for all *_NEW sheets ---
+    for ws_name in workbook.sheetnames:
+        if ws_name.lower().endswith("_new"):
+            ws = workbook[ws_name]
+            for col in range(1, ws.max_column + 1):
+                val = ws.cell(row=1, column=col).value
+                if val:
+                    new_header = str(val).replace(".", "").replace(" ", "")
+                    if new_header.startswith("-"):
+                        new_header = new_header[1:]
+                    new_header = new_header.replace("-", "_")
+                    ws.cell(row=1, column=col, value=new_header)
+
+    # --- STEP 4: Create final workbook and copy _NEW sheets ---
+    sheets_to_export = [v for v in sheets_to_copy.values() if v in workbook.sheetnames]
+    final_wb = Workbook()
+    if "Sheet" in final_wb.sheetnames:
+        final_wb.remove(final_wb["Sheet"])
+    for sheet_name in sheets_to_export:
+        src_sheet = workbook[sheet_name]
+        tgt_sheet = final_wb.create_sheet(title=sheet_name)
+        for row in src_sheet.iter_rows():
+            for cell in row:
+                tgt_sheet.cell(row=cell.row, column=cell.column, value=cell.value)
+
+    import re
+
+    def normalize_header(header: str) -> str:
+        if not header:
+            return ""
+        h = str(header).lower()
+        h = h.replace("%", "pc_")
+        h = h.replace(",", "_")
+        h = re.sub(r'(current_period_actual|prior_period_actual)$', '', h)
+        h = re.sub(r'[\s\.\-\_\+\(\)]', '', h)
+        return h
+
+    # --- FINAL HEADER CLEANUP: Apply _clean_token to all _NEW sheets ---
+    for ws_name in final_wb.sheetnames:
+        if ws_name.lower().endswith("_new"):
+            ws = final_wb[ws_name]
+            for col in range(1, ws.max_column + 1):
+                header_val = ws.cell(row=1, column=col).value
+                if header_val:
+                    ws.cell(row=1, column=col).value = _clean_token(str(header_val))
+
+    # --- Create Column_Reference ---
+    col_ref = final_wb.create_sheet(title="Column_Reference", index=0)
+    col_ref.append([
+        "original_sheet_name",
+        "original_column_number",
+        "original_header",
+        "final_column_header",
+        "final_column_number",
+        "period_type"
+    ])
+
+    for new_name in sheets_to_export:
+        orig_name = new_name.replace("_NEW", "")
+        if orig_name not in workbook.sheetnames:
+            continue
+        orig_ws = workbook[orig_name]
+        new_ws = final_wb[new_name]
+
+        final_headers = {}
+        for col in range(1, new_ws.max_column + 1):
+            header = new_ws.cell(row=1, column=col).value
+            if not header or str(header).strip() == "":
+                for row in range(2, new_ws.max_row + 1):
+                    val = new_ws.cell(row=row, column=col).value
+                    if val not in (None, "", " "):
+                        header = val
+                        break
+            if header:
+                final_headers[col] = header
+
+        used_orig_cols = set()
+
+        for final_col, final_header in final_headers.items():
+            period_type = "Current" if final_header.lower().endswith("_current_period_actual") else \
+                          "Prior" if final_header.lower().endswith("_prior_period_actual") else "NA"
+
+            matched_col = None
+            matched_header = None
+
+            for col_idx in range(1, orig_ws.max_column + 1):
+                if col_idx in used_orig_cols:
+                    continue
+                orig_header = orig_ws.cell(row=1, column=col_idx).value
+                if not orig_header or str(orig_header).strip() == "":
+                    for row in range(2, orig_ws.max_row + 1):
+                        val = orig_ws.cell(row=row, column=col_idx).value
+                        if val not in (None, "", " "):
+                            orig_header = val
+                            break
+                    if not orig_header:
+                        continue
+                if str(orig_header).strip().lower() == str(final_header).strip().lower():
+                    matched_col = col_idx
+                    matched_header = orig_header
+                    break
+
+            if not matched_col:
+                final_norm = normalize_header(final_header)
+                for col_idx in range(1, orig_ws.max_column + 1):
+                    if col_idx in used_orig_cols:
+                        continue
+                    orig_header = orig_ws.cell(row=1, column=col_idx).value
+                    if not orig_header or str(orig_header).strip() == "":
+                        for row in range(2, orig_ws.max_row + 1):
+                            val = orig_ws.cell(row=row, column=col_idx).value
+                            if val not in (None, "", " "):
+                                orig_header = val
+                                break
+                        if not orig_header:
+                            continue
+                    if normalize_header(orig_header) == final_norm:
+                        matched_col = col_idx
+                        matched_header = orig_header
+                        break
+
+            if matched_col:
+                used_orig_cols.add(matched_col)
+                col_ref.append([orig_name, matched_col, matched_header, final_header, final_col, period_type])
+            else:
+                col_ref.append([orig_name, "DELETED", "DELETED", final_header, final_col, period_type])
+
+    # --- Dynamic replacements in Column C (Original_Header) ---
+    col_ref_sheet = final_wb["Column_Reference"]
+    replace_map_colC = {
+        "total entity data": "gn17.3 - loans and borrowings (excluding bank overdrafts) - non ic accounts",
+        "dec": "gn17.3 - loans and borrowings (excluding bank overdrafts) - non ic accounts",
+        "entity tb": "gn 17.3 - commentary loans and borrowings (excluding bank overdrafts)",
+    }
+
+    for row in range(2, col_ref_sheet.max_row + 1):
+        orig_header = col_ref_sheet.cell(row=row, column=3).value
+        if orig_header:
+            orig_header_lower = str(orig_header).strip().lower()
+            for search_str, new_value in replace_map_colC.items():
+                if search_str in orig_header_lower:
+                    col_ref_sheet.cell(row=row, column=3).value = new_value
+                    break
+
+    # --- Dynamic replacements in Column D (Final_Column_Header) ---
+    replace_map_colD = {
+        "totalentitydata_current_period_actual": "gn173_loansandborrowings(excludingbankoverdrafts)_nonicaccounts_current_period_actual",
+        "dec_prior_period_actual": "gn173_loansandborrowings(excludingbankoverdrafts)_nonicaccounts_prior_period_actual",
+        "entitytb": "gn173_commentaryloansandborrowings(excludingbankoverdrafts)",
+    }
+
+    for row in range(2, col_ref_sheet.max_row + 1):
+        final_header = col_ref_sheet.cell(row=row, column=4).value
+        if final_header:
+            final_header_lower = str(final_header).strip().lower()
+            for search_str, new_value in replace_map_colD.items():
+                if search_str in final_header_lower:
+                    col_ref_sheet.cell(row=row, column=4).value = new_value
+                    break
+
+    col_ref_sheet.delete_cols(6)
+
+    col_ref_sheet.cell(row=1, column=6, value="tb_validated_status")
+    col_ref_sheet.cell(row=1, column=7, value="tb_amount")
+
+    max_row = col_ref_sheet.max_row
+    for row in range(2, max_row + 1):
+        if (col_ref_sheet.cell(row=row, column=6).value in (None, "") and
+            col_ref_sheet.cell(row=row, column=7).value in (None, "")):
+            col_ref_sheet.cell(row=row, column=6, value="NotRequired")
+            col_ref_sheet.cell(row=row, column=7, value=0)
+
+    first_empty_row = max_row + 1
+    while any(col_ref_sheet.cell(row=first_empty_row, column=col).value not in (None, "")
+              for col in range(1, col_ref_sheet.max_column + 1)):
+        first_empty_row += 1
+
+    value_to_copy = workbook["Entity TB"]["B2"].value
+    value_from_entity_tb = workbook["Entity TB"]["D2"].value
+
+    col_ref_sheet.cell(row=first_empty_row, column=2, value="Others")
+    col_ref_sheet.cell(row=first_empty_row, column=3, value="tb_validated_status")
+    col_ref_sheet.cell(row=first_empty_row, column=5, value=str(3))
+    col_ref_sheet.cell(row=first_empty_row, column=6, value=value_to_copy)
+    col_ref_sheet.cell(row=first_empty_row, column=7, value=value_from_entity_tb)
+    
+
+    # --- Final step: Clean up GN-17.3_NEW ---
+    if "GN-17.3_NEW" in final_wb.sheetnames:
+        ws_gn173 = final_wb["GN-17.3_NEW"]
+        ws_gn173.delete_rows(1, 5)
+        max_col = ws_gn173.max_column
+        for col in range(2, max_col + 1):
+            for row in range(1, ws_gn173.max_row + 1):
+                val = ws_gn173.cell(row=row, column=col).value
+                if val is not None and str(val).strip() != "":
+                    ws_gn173.cell(row=1, column=col, value=val)
+                    break
+        ws_gn173.cell(row=1, column=1, value="FSLI")
+        ws_gn173.cell(row=1, column=18, value="row_no")
+        for col in range(2, 6):
+            val = ws_gn173.cell(row=1, column=col).value
+            if val:
+                ws_gn173.cell(row=1, column=col, value=f"{val}_Current_Period_Actual")
+        for col in range(7, 11):
+            val = ws_gn173.cell(row=1, column=col).value
+            if val:
+                ws_gn173.cell(row=1, column=col, value=f"{val}_Prior_Period_Actual")
+        RESERVED = {"class", "def", "return"}
+        def clean_header(val):
+            t = str(val).strip()
+            t = re.sub(r"%+", "pc_", t)
+            t = t.replace("+", "_")
+            t = t.replace(".", "").replace(" ", "")
+            if t.startswith("-"):
+                t = t[1:]
+            t = re.sub(r"[^\w]+", "_", t)
+            t = re.sub(r"__+", "_", t).strip("_")
+            t = t.lower().lstrip("\ufeff")
+            if not t:
+                t = "col"
+            if re.match(r"^\d", t):
+                t = f"c_{t}"
+            if t in RESERVED:
+                t = f"{t}_"
+            return t
+        for col in range(1, ws_gn173.max_column + 1):
+            val = ws_gn173.cell(row=1, column=col).value
+            if val:
+                ws_gn173.cell(row=1, column=col, value=clean_header(val))
+
+
+    col_ref_ws = final_wb["Column_Reference"]
+
+    for row in range(2, col_ref_ws.max_row + 1):
+        sheet_name = col_ref_ws.cell(row=row, column=1).value
+        header_to_check = col_ref_ws.cell(row=row, column=4).value
+        if not sheet_name:
+            continue
+        if sheet_name in final_wb.sheetnames:
+            ws = final_wb[sheet_name]
+        elif f"{sheet_name}_NEW" in final_wb.sheetnames:
+            ws = final_wb[f"{sheet_name}_NEW"]
+        else:
+            print(f"Row {row}: Sheet '{sheet_name}' or '{sheet_name}_NEW' not found in workbook. NOT FOUND")
+            exit(1)
+        headers_in_sheet = [_clean_token(ws.cell(row=1, column=col).value)
+                            for col in range(1, ws.max_column + 1) if ws.cell(row=1, column=col).value]
+        norm_header_to_check = _clean_token(header_to_check)
+        if norm_header_to_check not in headers_in_sheet:
+            print(f"Row {row}: Header '{header_to_check}' not found in sheet '{ws.title}'. NOT FOUND")
+            exit(1)
+
+    #  Step: Remove rows with empty cells under FSLI in *_NEW sheets ---
+    for ws_name in final_wb.sheetnames:
+        if not ws_name.lower().endswith("_new"):
+            continue
+        ws = final_wb[ws_name]
+        fsli_cols = [col for col in range(1, ws.max_column + 1)
+                     if ws.cell(row=1, column=col).value and 'fsli' in str(ws.cell(row=1, column=col).value).lower()]
+        if not fsli_cols:
+            continue
+        rows_to_delete = set()
+        for col in fsli_cols:
+            for row in range(2, ws.max_row + 1):
+                cell_val = ws.cell(row=row, column=col).value
+                if cell_val is None or str(cell_val).strip() == "":
+                    rows_to_delete.add(row)
+        for row in sorted(rows_to_delete, reverse=True):
+            ws.delete_rows(row)
+
+    col_ref_sheet.cell(row=first_empty_row, column=1, value="Others")
+    col_ref_sheet.cell(row=first_empty_row, column=4, value="Others")
+
+       # Add new column "original_column_alphabet" at position 3
+    col_ref_sheet = final_wb["Column_Reference"]
+    col_ref_sheet.insert_cols(3)
+    col_ref_sheet.cell(row=1, column=3, value="original_column_alphabet")
+ 
+    # Fill the new column for all rows
+    for row in range(2, col_ref_sheet.max_row + 1):
+        col_number = col_ref_sheet.cell(
+            row=row, column=2
+        ).value  
+        if isinstance(col_number, int):
+            col_ref_sheet.cell(row=row, column=3, value=get_column_letter(col_number))
+        else:
+            col_ref_sheet.cell(
+                row=row, column=3, value=""
+            )  
+ 
+    print("Validated successfully")
+    final_wb.save(output_file)
+    print(f"Milestone 1 output saved: {output_file}")
+
+# === Define Milestone 2 ============
+
+def run_milestone2():
+    print("Running Milestone 2 ")
+
+    if not os.path.exists(input_file):
+        print(f"Input file not found: {input_file}")
+        exit(1)
+
+    # Load workbook (data_only=True to get cell values, not formulas)
+    wb_in = load_workbook(input_file, data_only=True)
+    wb_out = Workbook()
+    if "Sheet" in wb_out.sheetnames:
+        wb_out.remove(wb_out["Sheet"])
+
+    # Sheets to process
+    sheets_to_copy = ["SoPL - Commentary", "SoFP - Commentary"]
+
+    for sheet_name in sheets_to_copy:
+        if sheet_name in wb_in.sheetnames:
+            ws_in = wb_in[sheet_name]
+            new_sheet_name = f"{sheet_name}_NEW"
+            ws_out = wb_out.create_sheet(title=new_sheet_name)
+
+            # Copy all visible values
+            for row in ws_in.iter_rows():
+                for cell in row:
+                    if isinstance(cell, MergedCell):
+                        continue
+                    ws_out.cell(row=cell.row, column=cell.column, value=cell.value)
+
+                
+            ws_out.delete_rows(6, 8) 
+            ws_out.delete_rows(1, 4)
+
+
+            # --- Rename headers ---
+            headers = ["fsli", "current_period", "prior_period", "difference", "pc_change",
+                        "differenceofic", "differenceofnoic", "intercompany_entities_commentary",
+                        "no_intercompany_commentary"]
+
+            for col, header in enumerate(headers, start=1):
+                ws_out.cell(row=1, column=col, value=header)
+            # Remove rows with empty FSLI values
+            rows_to_delete = []
+            for row in range(2, ws_out.max_row + 1):
+                fsli_val = ws_out.cell(row=row, column=1).value
+                if fsli_val in (None, "") or str(fsli_val).strip() == "":
+                    rows_to_delete.append(row)
+
+            for row in reversed(rows_to_delete):
+                ws_out.delete_rows(row)
+
+
+    # Define keywords per sheet
+    keyword_map = {
+        "SoPL - Commentary": ["Revenues.", "Other operating expenses."],
+        "SoFP - Commentary": [
+            "Property, plant and equipment.",
+            "Accounts and other receivables.",
+            "Accounts and other receivables - current.",
+            "Loans and borrowings"
+        ]
+    }
+
+    def clean_text(s):
+        """Normalize text by removing special characters and lowercasing."""
+        if not s:
+            return ""
+        # Remove all characters except letters, numbers, and spaces
+        return re.sub(r'[^A-Za-z0-9 ]+', '', str(s)).lower().strip()
+
+    for sheet_name, keywords in keyword_map.items():
+        if sheet_name in wb_in.sheetnames:
+            ws_in = wb_in[sheet_name]
+            ws_out_extract = wb_out.create_sheet(title=sheet_name)
+
+            # Clean keywords once
+            cleaned_keywords = [clean_text(k) for k in keywords]
+            output_row = 1
+
+            for row in ws_in.iter_rows(values_only=True):
+                first_col_clean = clean_text(row[0]) if row and row[0] else ""
+
+                # Match only if the cleaned cell exactly equals a cleaned keyword
+                if any(first_col_clean == k for k in cleaned_keywords):
+                    for col_index, value in enumerate(row, start=1):
+                        ws_out_extract.cell(row=output_row, column=col_index, value=value)
+                    output_row += 1
+
+
+    #xtract Cover Page info (rows 7â€“11, columns Bâ€“C)
+ 
+    if "Cover Page" in wb_in.sheetnames:
+        ws_in = wb_in["Cover Page"]
+        ws_out_cover = wb_out.create_sheet(title="Cover Page")
+
+        headers = []
+        values = []
+
+        for row_num in range(7, 12):  # rows 7â€“11 inclusive
+            header_val = ws_in.cell(row=row_num, column=2).value  # Column B
+            value_val = ws_in.cell(row=row_num, column=3).value  # Column C
+            headers.append(header_val)
+            values.append(value_val)
+
+        # Write headers and values as rows
+        for col_index, header in enumerate(headers, start=1):
+            ws_out_cover.cell(row=1, column=col_index, value=header)
+
+        for col_index, val in enumerate(values, start=1):
+            ws_out_cover.cell(row=2, column=col_index, value=val)
+
+    # Save output
+    wb_out.save("milestone2_output.xlsx")
+    print(f"Milestone 2 output saved: milestone2_output.xlsx")
+
+if 1 in milestone:
+    run_milestone1()
+if 2 in milestone:
+    run_milestone2()
