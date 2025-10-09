@@ -1,0 +1,137 @@
+import os
+import re
+import time
+import msal
+import requests
+import jwt
+#from config import *
+import pandas as pd
+#from wordtoPDF import word_to_pdf
+from datetime import datetime
+from office365.sharepoint.client_context import ClientContext
+from office365.runtime.auth.user_credential import UserCredential
+
+base_dir=os.getcwd()
+print(base_dir)
+print("Process Started:")
+
+class Sharepoint_DocumentRepo:
+    # Initialize with SharePoint and Azure AD credentials
+    def __init__(self, TenantId, ClientId, ClientSecret, SiteDomain, SiteName, document_library):
+        self.TenantId = TenantId
+        self.ClientId = ClientId
+        self.ClientSecret = ClientSecret
+        self.SiteDomain = SiteDomain
+        self.SiteName = SiteName
+        self.document_library = document_library
+        self.token_url = f"https://login.microsoftonline.com/{TenantId}/oauth2/v2.0/token"
+        self.graph_api_url = "https://graph.microsoft.com/v1.0"
+        self.access_token = self.get_access_token()
+        self.headers = {"Authorization": f"Bearer {self.access_token}"}
+        self.site_id = self.get_site_id()
+        self.drive_id = self.get_drive_id()  
+        
+        print("acquire_tok:")
+
+    # Get access token for SharePoint
+    def get_access_token(self):
+        """Generates and returns the access token for the app using GraphAPI and the SharePoint credentials"""
+
+        app = msal.ConfidentialClientApplication(
+            self.ClientId,
+            authority=f"https://login.microsoftonline.com/{self.TenantId}",
+            client_credential=self.ClientSecret
+        )
+        result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+
+       # print("acquire_tok:", result.get("access_token"))
+        
+        if "access_token" in result:
+            return result["access_token"]
+        else:
+            raise Exception("Token acquisition failed", result)    
+
+    # Get site ID for SharePoint
+    def get_site_id(self):
+        """Returns the site ID for the given SharePoint site"""
+
+        url = f"{self.graph_api_url}/sites/{self.SiteDomain}:/sites/{self.SiteName}"
+        #print("site URL:", url)
+        response = requests.get(url, headers=self.headers)
+        if response.status_code == 200:
+            return response.json().get("id")
+        else:
+            print("Failed to retrieve site ID:", response.text)
+            raise Exception("Failed to retrieve site ID", response.text)
+
+    # Get drive ID for SharePoint document library
+    def get_drive_id(self):
+        """Returns the drive ID for the SharePoint folder, default folder is the Shared Documents"""
+        
+        url = f"{self.graph_api_url}/sites/{self.site_id}/drives"
+        #print("drive URL:", url)
+        response = requests.get(url, headers=self.headers)
+
+        if response.status_code == 200:
+            drives = response.json().get("value", [])
+            
+            for drive in drives:
+                if drive.get("name").lower() == self.document_library.lower():
+                    return drive["id"]
+            raise Exception(f"Drive '{self.document_library}' not found")
+        
+        else:
+            raise Exception("Failed to get drive ID", response.text)
+     
+    def move_file_sharepoint_service_account(site_url, username, password, source_folder_url, dest_folder_url, file_name):
+        """
+        Move a file between folders in SharePoint using a service account and password.
+        Args:
+            site_url (str): The SharePoint site URL.
+            username (str): Service account username.
+            password (str): Service account password.
+            source_folder_url (str): Server-relative URL of the source folder (e.g., '/sites/yoursite/Shared Documents/SourceFolder').
+            dest_folder_url (str): Server-relative URL of the destination folder.
+            file_name (str): Name of the file to move.
+        Returns:
+            bool: True if move succeeded, False otherwise.
+        """
+        ctx = ClientContext(site_url).with_credentials(UserCredential(username, password))
+        file = ctx.web.get_file_by_server_relative_url(f"{source_folder_url}/{file_name}")
+        file.move_to(f"{dest_folder_url}/{file_name}", 1).execute_query()
+        print(f"Moved {file_name} to {dest_folder_url}")
+        return True
+     
+repo = Sharepoint_DocumentRepo(
+    TenantId='5482c',
+    ClientId='',
+    ClientSecret='',
+    SiteDomain='sites.ey.com',
+    SiteName='UniversalBot_DEV',
+    document_library='Testing'
+)
+#folders = repo.list_folders_in_document_library()
+#print("Folders list':", [f["name"] for f in folders])
+
+#root_folders = repo.list_folders_in_document_library()
+
+# Source and destination folder paths
+FOLDER_PATH = "GRPs_and_Portfolio_Co_Stat_FS_2025/Samples/Automation_Input"
+DEST_FOLDER_PATH = "GRPs_and_Portfolio_Co_Stat_FS_2025/Samples/Automation_output"  # Change as needed
+#fileList = repo.list_files_in_subfolder(FOLDER_PATH)
+#repo.validations(fileList, dest_folder_path=DEST_FOLDER_PATH)
+repo.list_all_sharepoint_lists()
+list_items = repo.get_sharepoint_list_items("Vyaya Support Agent List")
+for item in list_items:
+    print(item)
+
+repo.move_file_sharepoint_service_account(
+    site_url="https://yourtenant.sharepoint.com/sites/yoursite",
+    username="@.com",
+    password="",
+    source_folder_url="/sites/yoursite/Shared Documents/SourceFolder",
+    dest_folder_url="/sites/yoursite/Shared Documents/DestFolder",
+    file_name="yourfile.xlsx"
+)
+
+print("Process ended:")
