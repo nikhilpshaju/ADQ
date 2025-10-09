@@ -9,7 +9,7 @@ from html import unescape
 
 # -------------------- Parameters --------------------
 TXN_ID = "MS1_1000001"
-RULE = "Rule3"
+RULE = "RULE 3"
 
 BASE_PATH = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/"
 
@@ -137,3 +137,152 @@ try:
     print(f"\n Reference data written successfully to {output_path}")
 except Exception as e:
     raise RuntimeError(f"Failed to write reference data: {e}")
+
+
+
+#RULE3 FOR GN.18.1.1 SHEET 
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col, when, lit, trim, regexp_extract, concat,
+    format_number, coalesce)
+from html import unescape
+
+# -------------------- Parameters --------------------
+TXN_ID = "MS1_1000001"
+RULE = "RULE 3"
+SHEET_NAME = "GN-18.1.1"
+
+BASE_PATH = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/"
+rules_table = BASE_PATH + "core_other_accounts_thresholds"
+data_table_path = BASE_PATH + "ods_gn_18_1_1"
+output_path = BASE_PATH + "Rule3_reference_gn_18_1_1"
+
+reference_schema = [
+    "rulesid", "odsid", "Rule", "PassFailFlag",
+    "Remarks", "AIInsights", "txnID", "sheetName"
+]
+
+# -------------------- Spark Session --------------------
+spark = SparkSession.builder \
+    .appName("ADQFabricLHDev01") \
+    .config("spark.jars.packages", "io.delta:delta-core_2.12:2.4.0") \
+    .getOrCreate()
+
+# -------------------- Load Rules --------------------
+try:
+    spark.read.format("delta").load(rules_table).createOrReplaceTempView("rules_view")
+except Exception as e:
+    raise RuntimeError(f"Failed to load rules table: {e}")
+
+# -------------------- Initialize Reference DF --------------------
+reference_df = spark.createDataFrame(
+    [], schema=",".join([f"{col} string" for col in reference_schema])
+)
+
+# -------------------- Process GN-18.1.1 Sheet --------------------
+try:
+    print(f"\nProcessing sheet: {SHEET_NAME}")
+    spark.read.format("delta").load(data_table_path).createOrReplaceTempView("data_view")
+
+    rules_df = spark.sql(f"SELECT * FROM rules_view WHERE sheet = '{SHEET_NAME}'")
+    rules = rules_df.collect()
+    available_cols = spark.table("data_view").columns
+
+    # Step 1: Find dynamic row_no for 'Current period'
+    current_period_row_df = spark.table("data_view") \
+        .filter((trim(col("fsli")) == "Current period") & (col("txnID") == TXN_ID)) \
+        .select("row_no") \
+        .orderBy("row_no") \
+        .limit(1)
+
+    current_period_row = current_period_row_df.first()
+
+    if not current_period_row:
+        raise Exception(f"[Header Detection Error] No row found with fsli = 'Current period' for txnID = '{TXN_ID}'")
+
+    current_period_row_no = current_period_row["row_no"]
+
+    for rule in rules:
+        try:
+            column = rule['header']
+            operator = unescape(rule['operator'])
+            threshold = float(rule['threshold'])
+            fsli = rule['fsli']
+
+            if column not in available_cols:
+                print(f" Skipping rule id {rule['id']} — column '{column}' not found in {SHEET_NAME}")
+                continue
+
+            # Step 2: Filter data from current_period_row_no onwards
+            filtered_data_df = spark.table("data_view") \
+                .filter((col("fsli") == fsli) &
+                        (col("txnID") == TXN_ID) &
+                        (col("row_no") >= current_period_row_no) &
+                        (col(column).isNotNull()))
+
+            is_blank = (col(column).isNull()) | (trim(col(column)) == "")
+            is_non_numeric = regexp_extract(
+                col(column).cast("string"),
+                '^[-]?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?$', 0) == ""
+
+            col_casted = col(column).cast("double")
+            col_string = col(column).cast("string")
+
+            if operator == "<":
+                pass_condition = col_casted < threshold
+            elif operator == ">":
+                pass_condition = col_casted > threshold
+            else:
+                print(f" Skipping unknown operator '{operator}' for rule id {rule['id']}")
+                continue
+
+            df_validated = filtered_data_df.withColumn(
+                "PassFailFlag",
+                when(is_blank, lit("Fail"))
+                .when(is_non_numeric, lit("Error"))
+                .when(pass_condition, lit("Pass"))
+                .otherwise(lit("Fail"))
+            ).withColumn(
+                "Remarks",
+                when(is_blank,
+                     concat(lit("Blank cell - seen value: "), coalesce(col_string, lit("NULL"))))
+                .when(is_non_numeric,
+                     concat(lit("Character/Non-numeric value - seen value: "), coalesce(col_string, lit("NULL"))))
+                .when(pass_condition, lit(""))
+                .otherwise(
+                    concat(
+                        lit(f"{operator}{threshold:.2f} expected but got "),
+                        format_number(col_casted, 2)
+                    ))
+            ).withColumn("rulesid", lit(str(rule['id']))) \
+             .withColumn("odsid", col("id")) \
+             .withColumn("Rule", lit(RULE)) \
+             .withColumn("AIInsights", lit("")) \
+             .withColumn("txnID", lit(TXN_ID)) \
+             .withColumn("sheetName", lit(SHEET_NAME))
+
+            reference_df = reference_df.unionByName(df_validated.select(reference_schema))
+
+        except Exception as e:
+            print(f" Error processing rule id {rule['id']} in sheet {SHEET_NAME}: {str(e)}")
+            error_df = spark.createDataFrame(
+                [(str(rule['id']), None, RULE, "Error", f"Error during processing: {str(e)}", "", TXN_ID, SHEET_NAME)],
+                reference_schema
+            )
+            reference_df = reference_df.unionByName(error_df)
+
+except Exception as e:
+    print(f" Failed to process sheet '{SHEET_NAME}': {str(e)}")
+
+# -------------------- Write Output --------------------
+try:
+    reference_df.write.format("delta").mode("overwrite").save(output_path)
+    print(f"\nReference data written successfully to {output_path}")
+except Exception as e:
+    raise RuntimeError(f"Failed to write reference data: {e}")
+
+
+
+
