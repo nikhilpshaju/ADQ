@@ -1,4 +1,40 @@
-  print(f"Created By: {item.get('createdBy', {}).get('user', {}).get('displayName')}")
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+
+spark = SparkSession.builder.appName("SharePointJSON").getOrCreate()
+
+# Read the JSON string
+df = spark.read.json(spark.sparkContext.parallelize([raw_json]))
+
+df.printSchema()
+df.show(truncate=False)
+
+
+
+# Flatten the nested 'createdBy.user.email'
+df_flat = df.select(
+    col("fields.*"),  # expands all field-level columns
+    col("createdBy.user.email").alias("CreatedByEmail"),
+    col("lastModifiedBy.user.email").alias("ModifiedByEmail")
+)
+
+df_flat.show(truncate=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+print(f"Created By: {item.get('createdBy', {}).get('user', {}).get('displayName')}")
 
 
 
