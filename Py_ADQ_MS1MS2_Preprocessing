@@ -770,3 +770,30 @@ if milestone == 1:
     run_milestone1()
 else:
     run_milestone2()
+
+
+
+
+
+    # Add new column "original_column_alphabet" at position 3
+    col_ref_sheet = final_wb["Column_Reference"]
+    col_ref_sheet.insert_cols(3)
+    col_ref_sheet.cell(row=1, column=3, value="original_column_alphabet")
+ 
+    # Fill the new column for all rows
+    for row in range(2, col_ref_sheet.max_row + 1):
+        original_col_number = col_ref_sheet.cell(row=row, column=2).value
+        final_col_number = col_ref_sheet.cell(row=row, column=6).value
+ 
+        if isinstance(original_col_number, int):
+            col_ref_sheet.cell(
+                row=row, column=3, value=get_column_letter(original_col_number)
+            )
+        elif original_col_number in (None, "DELETED") and isinstance(
+            final_col_number, int
+        ):
+            col_ref_sheet.cell(
+                row=row, column=3, value=get_column_letter(final_col_number)
+            )
+        else:
+            col_ref_sheet.cell(row=row, column=3, value="")
