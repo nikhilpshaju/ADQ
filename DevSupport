@@ -1,3 +1,41 @@
+
+
+
+
+
+
+
+{"id":"0x010026CD01070899A940B0B3E0B57A96757B001FC6B802568B9749A4FE0EA1916ECF1D","name":"Item"},"fields@odata.context":"https://graph.microsoft.com/v1.0/$metadata#sites('addhc.sharepoint.com%2C52300bcb-f327-4bdb-a01a-946f1528a89b%2C8d26ba3d-202f-433e-aca4-dd5e78678ba7')/lists('BoostConfig_Dev')/items('9')/fields/$entity","fields":{"@odata.etag":"\"e2c98274-c691-4d5f-af78-a0b2f5fcac57,2\"","Phase":"MS1","Parameter":"Threshold Amount - Other thresholds - CF Review form","Value":"20","Description":"Specifies the threshold value in millions to be used for validation in the CF Review form tab","id":"9","ContentType":"Item","Modified":"2025-10-08T13:24:32Z","Created":"2025-10-08T13:23:00Z","AuthorLookupId":"276","EditorLookupId":"276","_UIVersionString":"2.0","Attachments":false,"Edit":"","ItemChildCount":"0","FolderChildCount":"0","_ComplianceFlags":"","_ComplianceTag":"","_ComplianceTagWrittenTime":"","_ComplianceTagUserId":""}},{"@odata.etag":"\"72c6e49d-d0d4-4078-9902-63985226d390,3\"","createdDateTime":"2025-10-08T13:23:53Z","eTag":"\"72c6e49d-d0d4-4078-9902-63985226d390,3\"","id":"10","lastModifiedDateTime":"2025-10-08T13:24:37Z","webUrl":"https://addhc.sharepoint.com/sites/FinancialConsolidation-External/Lists/BoostConfig_Dev/10_.000","createdBy":{"user":{"email":"shmenon@adq.ae","id":"d5b42056-e9dd-420a-b43c-504e1106a28a","displayName":"Shruthi Menon"}},"lastModifiedBy":{"user":{"email":"shmenon@adq.ae","id":"d5b42056-e9dd-420a-b43c-504e1106a28a","displayName":"Shruthi Menon"}},"parentReference":{"id":"0f004d0d-bfd5-4db1-956c-6d9a7e023ba4","siteId":"addhc.sharepoint.com,52300bcb-f327-4bdb-a01a-946f1528a89b,8d26ba3d-202f-433e-aca4-dd5e78678ba7"}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def list_all_sharepoint_lists(self):
         """
         Lists all SharePoint lists in the current site using Microsoft Graph API.
