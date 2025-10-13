@@ -70,3 +70,61 @@ def set_calc_mode_auto(xlsx_path, output_path):
 
 # Usage example
 set_calc_mode_auto('input_workbook.xlsx', 'output_workbook_auto_calc.xlsx')
+
+
+
+
+
+
+import zipfile
+import shutil
+import os
+from lxml import etree
+
+def set_calc_mode_auto(xlsx_path, output_path):
+    temp_dir = 'temp_xlsx'
+    
+    # 1. Extract the XLSX contents to a temp directory
+    with zipfile.ZipFile(xlsx_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+    
+    # 2. Path to the workbook.xml inside extracted folder
+    workbook_xml_path = os.path.join(temp_dir, 'xl', 'workbook.xml')
+    
+    # 3. Parse workbook.xml with lxml
+    parser = etree.XMLParser(remove_blank_text=True)
+    tree = etree.parse(workbook_xml_path, parser)
+    root = tree.getroot()
+    
+    # 4. Extract the namespace from root tag, e.g. '{namespace}workbook'
+    ns_uri = root.tag[root.tag.find("{")+1 : root.tag.find("}")]
+    ns = {'ns': ns_uri}
+    
+    # 5. Find workbookPr element with the correct namespace
+    workbookPr = root.find('ns:workbookPr', namespaces=ns)
+    
+    if workbookPr is None:
+        # Create workbookPr if it doesn't exist
+        workbookPr = etree.Element(f'{{{ns_uri}}}workbookPr')
+        root.insert(0, workbookPr)
+    
+    # 6. Set calcMode attribute to auto
+    workbookPr.set('calcMode', 'auto')
+    
+    # 7. Write back the modified XML
+    tree.write(workbook_xml_path, pretty_print=True, xml_declaration=True, encoding='UTF-8')
+    
+    # 8. Re-zip the folder contents into a new XLSX file
+    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
+        for foldername, subfolders, filenames in os.walk(temp_dir):
+            for filename in filenames:
+                file_path = os.path.join(foldername, filename)
+                archive_name = os.path.relpath(file_path, temp_dir)
+                zip_out.write(file_path, archive_name)
+    
+    # 9. Cleanup temp directory
+    shutil.rmtree(temp_dir)
+
+# Usage
+set_calc_mode_auto('input_workbook.xlsx', 'output_workbook_auto_calc.xlsx')
+
