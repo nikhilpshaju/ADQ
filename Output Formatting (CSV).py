@@ -1,0 +1,191 @@
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import pandas as pd
+
+# File names 
+input_file = "deltatable.csv"
+source_file = "Variance - copy.xlsx"
+output_file = "Out.xlsx"
+
+# Step 1: Load source workbook 
+wb_source = load_workbook(source_file, data_only=True)
+
+# Create output workbook
+wb_out = Workbook()
+if "Sheet" in wb_out.sheetnames:
+    wb_out.remove(wb_out["Sheet"])
+
+# Only process sheets "SoFP" and "SoPL"
+sheets_to_copy = ["SoFP", "SoPL"]
+for sheet_name in sheets_to_copy:
+    if sheet_name in wb_source.sheetnames:
+        ws_source = wb_source[sheet_name]
+        ws_out = wb_out.create_sheet(title=ws_source.title)
+
+        # Copy data up to column F
+        for r_idx, row in enumerate(ws_source.iter_rows(max_col=6, values_only=True), start=1):
+            for c_idx, val in enumerate(row, start=1):
+                ws_out.cell(row=r_idx, column=c_idx, value=val)
+
+# Step 2: Load CSV file using pandas
+df_input = pd.read_csv(input_file)
+
+# Handle missing headers or extra columns
+df_input = df_input.fillna("")
+
+# Group input data by FSLI
+fsli_data = {}
+for _, row in df_input.iterrows():
+    fsli = str(row.iloc[0]).strip()
+    if not fsli:
+        continue
+    entity = row.iloc[1] if len(row) > 1 else None
+    diff = row.iloc[2] if len(row) > 2 else None
+    comm = row.iloc[3] if len(row) > 3 else None
+    fsli_data.setdefault(fsli, []).append([entity, diff, comm])
+
+#  Step 3: Helper to find FSLI cell 
+def find_cell(sheet, value):
+    for r_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+        for c_idx, cell_val in enumerate(row, start=1):
+            if str(cell_val).strip() == str(value).strip():
+                return (r_idx, c_idx)
+    return None
+
+#  Step 4: Write delta data starting from column G 
+for fsli, records in fsli_data.items():
+    found = False
+    for ws_out in wb_out.worksheets:
+        if ws_out.title not in sheets_to_copy:
+            continue
+
+        pos = find_cell(ws_out, fsli)
+        if pos:
+            found = True
+            row_idx, _ = pos
+
+            # Write "Overall" merged across G:H
+            ws_out.merge_cells(start_row=row_idx, start_column=7, end_row=row_idx, end_column=8)
+            overall_cell = ws_out.cell(row=row_idx, column=7, value="Overall")
+            overall_cell.font = Font(bold=True)
+            overall_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            # Write delta records starting from next row
+            write_row = row_idx + 1
+            start_data_row = write_row
+            for rec in records:
+                for offset, val in enumerate(rec):
+                    ws_out.cell(row=write_row, column=7 + offset, value=val)
+                write_row += 1
+
+            # Write TOTAL row
+            total_row = write_row
+            total_label = ws_out.cell(row=total_row, column=7, value="Total")
+            total_label.font = Font(bold=True)
+
+            # Calculate totals per numeric column
+            num_cols = len(records[0]) if records else 0
+            for offset in range(num_cols):
+                col_idx = 8 + offset  # H onwards
+                values = []
+                for r in range(start_data_row, write_row):
+                    val = ws_out.cell(row=r, column=col_idx).value
+                    if isinstance(val, (int, float)):
+                        values.append(val)
+                if values:
+                    total_value = sum(values)
+                    total_cell = ws_out.cell(row=total_row, column=col_idx, value=total_value)
+                    total_cell.font = Font(bold=True)
+            break
+
+    if not found:
+        print(f" FSLI '{fsli}' not found in SoFP or SoPL.")
+
+#  Step 5: Add "Comments" header in I6 
+for ws_out in wb_out.worksheets:
+    ws_out.cell(row=6, column=9, value="Comments").font = Font(bold=True)
+
+#  Step 6: Bold rows 1–8 
+for ws_out in wb_out.worksheets:
+    for r_idx in range(1, 9):
+        for cell in ws_out[r_idx]:
+            if cell.value is not None:
+                cell.font = Font(bold=True)
+
+# Step 7: Apply gray fill to header rows (6–8) 
+fill_gray = PatternFill(start_color="BBBBBB", end_color="BBBBBB", fill_type="solid")
+align_center = Alignment(horizontal="center", vertical="center")
+
+for ws_out in wb_out.worksheets:
+    max_row = ws_out.max_row
+    max_col = ws_out.max_column
+    for col_idx in range(1, max_col + 1):
+        has_value_below = any(
+            ws_out.cell(row=r, column=col_idx).value is not None
+            for r in range(9, max_row + 1)
+        )
+        if has_value_below:
+            for r in range(6, 9):
+                cell = ws_out.cell(row=r, column=col_idx)
+                cell.fill = fill_gray
+                cell.alignment = align_center
+
+#  Step 8: Apply borders up to last data row & column 
+def get_data_boundaries(ws):
+    """Find the last row and column that actually contain data."""
+    max_row = 0
+    max_col = 0
+    for r_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        if any(row):
+            max_row = r_idx
+        for c_idx, cell_val in enumerate(row, start=1):
+            if cell_val is not None and c_idx > max_col:
+                max_col = c_idx
+    return max_row, max_col
+
+thin_border = Border(
+    left=Side(style="thin"),
+    right=Side(style="thin"),
+    top=Side(style="thin"),
+    bottom=Side(style="thin")
+)
+
+for ws_out in wb_out.worksheets:
+    max_row, max_col = get_data_boundaries(ws_out)
+    for r in range(9, max_row + 1):
+        for c in range(2, max_col + 1):
+            ws_out.cell(row=r, column=c).border = thin_border
+
+# Step 9: Merge downward empty cells in B–F 
+for ws_out in wb_out.worksheets:
+    max_row = ws_out.max_row
+    start_row = 9
+    for col in range(2, 7):  # Columns B–F
+        row = start_row
+        while row <= max_row:
+            cell = ws_out.cell(row=row, column=col)
+            if cell.value is not None:
+                merge_end = row
+                while merge_end + 1 <= max_row and ws_out.cell(row=merge_end + 1, column=col).value is None:
+                    merge_end += 1
+                if merge_end > row:
+                    ws_out.merge_cells(start_row=row, start_column=col, end_row=merge_end, end_column=col)
+                ws_out.cell(row=row, column=col).alignment = Alignment(horizontal="center", vertical="center")
+                row = merge_end + 1
+            else:
+                row += 1
+
+# Step 10: Format column F as percentages 
+for ws_out in wb_out.worksheets:
+    max_row = ws_out.max_row
+    for row in range(9, max_row + 1):
+        cell = ws_out.cell(row=row, column=6)
+        val = cell.value
+        if isinstance(val, (int, float)):
+            val = round(val, 4)
+            cell.value = val
+            cell.number_format = "0%"
+
+#  Save output 
+wb_out.save(output_file)
+print("Output saved into:", output_file)
