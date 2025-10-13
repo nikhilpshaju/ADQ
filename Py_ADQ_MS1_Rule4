@@ -1,0 +1,598 @@
+# Welcome to your new notebook
+# Type here in the cell editor to add code!
+!pip install openai
+
+
+
+import json
+import csv
+from openai import AzureOpenAI
+
+# =====================
+# CONFIGURATION
+# =====================
+MIN_GROUP_SIZE = 50   # Small parent groups (< this many rows) will be merged together
+MODEL = "gpt-4.1"     # OpenAI model to use
+TEMPERATURE = 0       # Deterministic output
+
+# Set your endpoint and API key
+endpoint = "https://oai-aiq-nprd-un.openai.azure.com/"
+api_key = ""  # Replace with your actual key
+deployment_name = ""  # This should match the name of your deployed model
+
+
+# Initialize the Azure OpenAI client
+client = AzureOpenAI(
+    api_key=api_key,
+    azure_endpoint=endpoint,
+    api_version="2025-01-01-preview"
+)
+
+response = client.chat.completions.create(
+    messages=[
+        {
+            "role": "system",
+            "content": "You are a helpful assistant.",
+        },
+        {
+            "role": "user",
+            "content": "I am going to Paris, what should I see?",
+        }
+    ],
+    max_completion_tokens=13107,
+    temperature=1.0,
+    top_p=1.0,
+    frequency_penalty=0.0,
+    presence_penalty=0.0,
+    model=deployment_name
+)
+
+print(response.choices[0].message.content)
+
+
+
+
+
+
+import json
+import csv
+from openai import AzureOpenAI
+
+# =====================
+# CONFIGURATION
+# =====================
+MIN_GROUP_SIZE = 50   # Small parent groups (< this many rows) will be merged together
+#MODEL = "gpt-4.1"     # OpenAI model to use
+TEMPERATURE = 0       # Deterministic output
+
+# Set your endpoint and API key
+endpoint = ""
+api_key = ""  # Replace with your actual key
+deployment_name = ""  # This should match the name of your deployed model
+
+# Initialize the Azure OpenAI client
+client = AzureOpenAI(
+    api_key=api_key,
+    azure_endpoint=endpoint,
+    api_version="2025-01-01-preview"
+)
+
+
+# -------------------
+# 1. System Prompt (ruleset)
+# -------------------
+SYSTEM_PROMPT = """
+You are an AI assistant reviewing a Quarterly Financial Statement (FS) Review Pack.
+Your task is to validate commentary provided against variances along three dimensions: Existence, Completeness, and Accuracy.
+Follow the rules carefully and return a structured JSON output in the specified schema.
+You will be given input data in the following format:
+• Line Item
+• Current Year Value (CY)
+• Previous Year Value (PY)
+• Difference (absolute)
+• Percentage Change
+• Commentary
+Rules for interpreting input
+• The last line item is always the parent (sub-FSLI).
+• All lines above the parent are child accounts.
+• If there is only one line item, treat it as the parent line.
+Validation Rules
+
+1. Existence
+• Check at the parent (sub-FSLI) level.
+• If parent variance exceeds the materiality threshold and at least one child account has any commentary other than “0”, then Existence = Pass.
+• Do not fail existence because some children are missing commentary.
+• Do not require parent line commentary — only children count.
+
+2. Completeness
+Important: Do not assume or infer any business reasons beyond what is explicitly written in the commentary.
+Commentary at the child level should collectively explain ≥80% of the parent variance.
+Apply checks in this order:
+Step 1: Numeric Extraction
+1.	If commentary includes numbers, extract them and apply signs based on direction words.
+o	Apply direction at the number level, not the sentence level.
+o	A direction keyword applies to a number if it occurs within three words before or after that number.
+o	If multiple numbers in the same commentary have different directions, treat them separately and sum the results.
+o	If no direction keyword is found near a number, assume it is positive.
+2.	Scale units properly:
+o	m, mn, mio, million, millions → ×1,000,000
+o	bn, billion, billions → ×1,000,000,000
+o	k, thousand, thousands → ×1,000
+3.	Ignore irrelevant numbers:
+o	Years/dates (e.g., 2025, FY2024, Q1 2025)
+o	Small standalone identifiers ≤100 without units (e.g., “16 OSSA”, “Note 37”, “section 5”)
+Step 2: Summation
+If multiple numbers are extracted, sum them after applying direction and scaling.
+Step 3: Qualitative Explanation
+If no numeric data are present, but commentary cites a recognized qualitative driver (e.g., reclassification, FX translation, acquisition/disposal, provision release), treat this as a candidate for qualitative completeness.
+A qualitative commentary is acceptable as a complete explanation if:
+•	It explicitly explains the full variance for the parent (e.g., “entire movement due to FX revaluation” or “overall increase driven by acquisition of XYZ” or "Net decrease in payable is reclass from noncurrent to current"), even if only one child contains the commentary; or
+•	It clearly indicates that the qualitative factor (e.g., FX, acquisition, reclassification) is the sole reason for the overall change in that account group.
+If the commentary mentions a qualitative driver but is limited to a single account without specifying that it applies to the full parent movement, treat it as Incomplete.
+Never assume that a qualitative driver explains the full variance unless the commentary explicitly says so.
+Step 4: Coverage Computation
+If neither numeric nor qualitative full coverage is established:
+•	Sum variances of child accounts with commentary and compare against parent variance.
+•	Include commentary even if child variance = 0 only if that commentary contributes to explaining the parent-level movement (e.g., “overall increase due to FX”).
+Output Justification Example:
+Fail. Explained 85.5m (52.47% of 162.94m) → fails 80% threshold. 
+29.5m + 26m = 55.5m | 43m + 19m – 32m = 30m → correctly applied as +30m | 
+Total explained = 55.5m + 30m = 85.5m
+
+Pass. Explained 130.35m (80% of 162.94m) → passes 80% threshold. 
+34.35m + 66m = 100.35m | 43m + 19m – 32m = 30m → correctly applied as +30m | 
+Total explained = 100.35m + 30m = 130.35m
+
+3. Accuracy
+Important: Do not assume or infer any business reasons beyond what is explicitly written in the commentary.
+• Commentary must correctly reflect the direction of variance at the parent level.
+• If the commentary is vague, generic, or lacks stated drivers, it must be flagged as Incomplete or Fail, even if the variance could logically be explained.
+Rules:
+•	If commentary is from only one child account → check against parent variance direction.
+•	If there are multiple child accounts → check each against its own variance direction.
+o	If all pass → Accuracy = Pass.
+o	If some pass and some fail → Accuracy = Inconclusive (list failing accounts).
+Reasoning must be specific and logical. Substantive reasons include (but are not limited to):
+•	Reclassification: contract maturity, regulatory change, transfer of entity/division.
+•	FX translation: identification of currency, rate movement, or timing.
+•	Acquisition/Disposal: name, timing, consolidation scope.
+•	Provision release: expiry, settlement, or reversal reason.
+If commentary only states the accounting mechanism without reason (e.g., “reclassified”, “FX differences”, “acquisition”, “provision released”), mark as Accuracy = Fail.
+Clarification:
+Completeness assesses coverage of variance amount;
+Accuracy assesses correctness of direction and stated reason.
+They are evaluated independently.
+Output Justification Examples:
+Pass. Directions in commentary match variances: Government payable commentary states 'increase' (+135.4m). Non-government commentary states 'increase … partly offset by decrease' (+27.5m with offsets). Specific wording (interest, accruals, fabrication costs) consistent with variance direction.
+
+Pass (Reclass with reason): “Reclassified from noncurrent to current as contract matured on 30-Jun-2025 with settlement due in Q1 2026.” → 100% explained.
+
+Fail (Reclass without reason): “Net decrease is reclass from noncurrent to current.” → Incomplete; rationale missing.
+
+Fail (FX vague): “Variance due to FX differences.” → Incomplete.
+
+Pass (Acquisition): “Increase reflects consolidation of XYZ subsidiary acquired on 15-Mar-2025.” → 100% explained.
+
+Fail (Acquisition vague): “Increase due to acquisition.” → Incomplete.
+
+Pass (Provision): “Decrease due to release of litigation provision as case settled favorably in Q2 2025.” → Explained qualitatively.
+
+Fail (Provision vague): “Provision released.” → Incomplete.
+
+4. Output Format
+Final output must be at parent (sub-FSLI) level, but show supporting details from child accounts.
+Output JSON schema:
+{
+  "Sub-FSLI": "<Parent Line Item>",
+  "Existence": {
+    "status": "Pass/Fail",
+    "justification": "<existence reasoning>"
+  },
+  "Completeness": {
+    "status": "Pass/Fail",
+    "explained_amount": <numeric>,
+    "coverage_percentage": <numeric>,
+    "basis": [
+      {
+        "account": "<Child Line Item>",
+        "commentary": "<Child Commentary>",
+        "explained_amount": <numeric>
+      }
+    ],
+    "justification": "<detailed reasoning with calculations>"
+  },
+  "Accuracy": {
+    "status": "Pass/Fail/Inconclusive",
+    "direction_check": "<direction consistency result>",
+    "reasoning_check": "<detailed reasoning with commentary direction validation>"
+  },
+  "Final_Status": "OK / Missing / Incomplete / Inaccurate / Inconclusive",
+  "Overall_Justification": "<short summary combining the 3 checks>"
+}
+
+5. Final Status Mapping Logic
+If Existence = Fail → Final_Status = "Missing"
+Else if Completeness = Fail → Final_Status = "Incomplete"
+Else if Accuracy = Fail → Final_Status = "Inaccurate"
+Else if Accuracy = Inconclusive → Final_Status = "Inconclusive"
+Else → Final_Status = "OK"
+
+"""
+
+
+
+# -------------------
+# 2. Normalize rows
+# -------------------
+def normalize_row(row):
+    return {
+        "line_item": row.get("Line Item", "").strip(),
+        "CY": row.get("CY Value", "0") or "0",
+        "PY": row.get("PY Value", "0") or "0",
+        "difference": row.get("Difference", "0") or "0",
+        "pct_change": row.get("% Change", "0") or "0",
+        "comment": row.get("Commentary", "").strip(),
+    }
+
+# -------------------
+# 3. Format rows into Markdown table
+# -------------------
+def format_rows_as_table(rows):
+    header = "| Line Item | CY Value | PY Value | Difference | % Change | Comment |"
+    lines = []
+    for row in rows:
+        lines.append(
+            f"| {row['line_item']} | {row['CY']} | {row['PY']} | {row['difference']} | {row['pct_change']} | {row['comment']} |"
+        )
+    return header + "\n" + "\n".join(lines)
+
+# -------------------
+# Run one batch (parent group)
+# -------------------
+def run_batch(rows, model=deployment_name, temperature=TEMPERATURE):
+    user_message = "Validate the following financial statement data:\n\n" + format_rows_as_table(rows)
+    response = client.chat.completions.create(
+        model=deployment_name,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=temperature,
+    )
+    return response.choices[0].message.content
+
+# -------------------
+# Save JSON safely
+# -------------------
+def save_json(content, parent_name, batch_index):
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    # sanitize parent name for filename
+    safe_name = parent_name.replace(" ", "_").replace("/", "_").replace(":", "_")
+    file_path = os.path.join(RESULTS_DIR, f"batch_{batch_index}_{safe_name}.json")
+
+    try:
+        parsed = json.loads(content)
+        
+        # Save JSON
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(parsed, f, indent=2, ensure_ascii=False)
+        
+        # Print JSON to console (pretty)
+        print(f"\n Output for {parent_name} (Batch {batch_index}):")
+        print(json.dumps(parsed, indent=2, ensure_ascii=False))
+        print(f" Saved JSON to {file_path}")
+        
+        return parsed
+
+    except json.JSONDecodeError:
+        # Save raw text for debugging
+        error_path = file_path.replace(".json", "_RAW.txt")
+        with open(error_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"\n Could not parse JSON for {parent_name} (Batch {batch_index}). Raw output saved to {error_path}")
+        print(content)  # print raw content in console
+        return None
+
+
+# -------------------
+# 5. Group rows by MAIN parent (+GN), merge small groups
+# -------------------
+def split_by_main_parent_and_merge(all_rows, min_group_size=MIN_GROUP_SIZE):
+    """
+    Groups rows by main parent (+GN).
+    - Each main parent group is kept intact (no splitting even if >50 rows).
+    - Small consecutive groups (< min_group_size rows) are merged together.
+    """
+    raw_groups = []
+    current_group = []
+
+    for row in all_rows:
+        if row["line_item"].startswith("+GN"):
+            if current_group:
+                raw_groups.append(current_group)
+                current_group = []
+        current_group.append(row)
+
+    if current_group:
+        raw_groups.append(current_group)
+
+    # Merge small groups
+    final_groups = []
+    temp_group = []
+
+    for g in raw_groups:
+        if len(g) < min_group_size:
+            temp_group.extend(g)
+            if len(temp_group) >= min_group_size:
+                final_groups.append(temp_group)
+                temp_group = []
+        else:
+            if temp_group:
+                final_groups.append(temp_group)
+                temp_group = []
+            final_groups.append(g)
+
+    if temp_group:
+        final_groups.append(temp_group)
+
+    return final_groups
+
+# -------------------
+# Run in parent-level batches with JSON export
+# -------------------
+def run_in_parent_batches(all_rows, min_group_size=MIN_GROUP_SIZE):
+    groups = split_by_main_parent_and_merge(all_rows, min_group_size=min_group_size)
+    consolidated = []
+
+    for i, group in enumerate(groups, start=1):
+        parent_names = [r["line_item"] for r in group if r["line_item"].startswith("+GN")]
+        parents_str = ", ".join(parent_names) if parent_names else "Unknown_Parent"
+
+        print(f"\n--- Running batch {i}/{len(groups)} (Parents: {parents_str}, Rows: {len(group)}) ---")
+        result = run_batch(group)
+        print(result)
+
+        parsed = save_json(result, parents_str, i)
+        if parsed:
+            consolidated.append(parsed)
+
+    # Save consolidated file
+    consolidated_path = os.path.join(RESULTS_DIR, "all_results.json")
+    with open(consolidated_path, "w", encoding="utf-8") as f:
+        json.dump(consolidated, f, indent=2, ensure_ascii=False)
+    print(f"\n Consolidated results saved to {consolidated_path}")
+
+    return consolidated
+    
+
+# -------------------
+# 7. Load from CSV (if needed)
+# -------------------
+def load_from_csv(file_path):
+    rows = []
+    with open(file_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(normalize_row(row))
+    return rows
+
+# -------------------
+# 8. Example run (replace with CSV input if available)
+# -------------------
+if __name__ == "__main__":
+    rows = [
+        #{"Line Item":"Interest payable","CY Value":"0","PY Value":"1","Difference":"-1","% Change":"-76","Commentary":"Immaterial"},
+        #{"Line Item":"Other payables","CY Value":"13939767","PY Value":"12772777","Difference":"1166990","% Change":"9","Commentary":"Immaterial"},
+        #{"Line Item":"Salary payable","CY Value":"78935188","PY Value":"148545483","Difference":"-69610295","% Change":"-47","Commentary":"Decrease of AED 70m from bonus due to payment in Q1."},
+        #{"Line Item":"+Employee payables - current","CY Value":"78935188","PY Value":"148545483","Difference":"-69610295","% Change":"-47","Commentary":"0"},
+        #{"Line Item":"+GN 28 - Other payables","CY Value":"110178815","PY Value":"169190979","Difference":"-59012165","% Change":"-35","Commentary":"0"},
+        #{"Line Item":"Some other child","CY Value":"123","PY Value":"456","Difference":"-333","% Change":"-73","Commentary":"0"},
+        #{"Line Item":"+GN 29 - Borrowings","CY Value":"500","PY Value":"450","Difference":"50","% Change":"11","Commentary":""},
+
+        {"Line Item":"Interest payable","CY Value":"0","PY Value":"1","Difference":"-1","% Change":"-76","Commentary":"Immaterial"},
+        {"Line Item":"Dividend payable/unclaimed dividend","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Bank guarantees","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Other payables","CY Value":"13939767","PY Value":"12772777","Difference":"1166990","% Change":"9","Commentary":"Immaterial"},
+        {"Line Item":"77 XYZ Intercompany dividend payable","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Dividends from listed companies payable","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Other current liability","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Settlement payables","CY Value":"17303858","PY Value":"7872718","Difference":"9431140","% Change":"120","Commentary":"0"},
+        {"Line Item":"Salary payable","CY Value":"78935188","PY Value":"148545483","Difference":"-69610295","% Change":"-47","Commentary":"Decrease of AED 70m from bonus due to payment in Q1."},
+        {"Line Item":"Employee vacation payable","CY Value":"0","PY Value":"0","Difference":"0","% Change":"100","Commentary":"0"},
+        {"Line Item":"+Employee payables - current","CY Value":"78935188","PY Value":"148545483","Difference":"-69610295","% Change":"-47","Commentary":"0"},
+        {"Line Item":"XYZ Intercompany payables - current","CY Value":"0","PY Value":"0","Difference":"0","% Change":"100","Commentary":"0"},
+        {"Line Item":"Intracompany payables - current","CY Value":"1","PY Value":"0","Difference":"1","% Change":"270","Commentary":"Immaterial"},
+        {"Line Item":"Advances/deposits received - current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Security deposits received - current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Other deposits received - current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"Banking: Customer Deposits Current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"+Deposits received - current","CY Value":"0","PY Value":"0","Difference":"","% Change":"0","Commentary":"0"},
+        {"Line Item":"+GN 28 - Other payables","CY Value":"110178815","PY Value":"169190979","Difference":"-59012165","% Change":"-35","Commentary":"0"},
+
+    ]
+
+    
+
+normalized_rows = [normalize_row(r) for r in rows]
+run_in_parent_batches(normalized_rows)
+
+
+
+
+
+
+#Simple one for testing GN28
+
+from openai import AzureOpenAI
+
+endpoint = ""
+api_key = ""  # Replace with your actual key
+deployment_name = ""  # This should match the name of your deployed model
+
+
+# Initialize the Azure OpenAI client
+client = AzureOpenAI(
+    api_key=api_key,
+    azure_endpoint=endpoint,
+    api_version="2025-01-01-preview"
+)
+
+
+prompt = """
+You are an AI assistant reviewing a Quarterly Financial Statement (FS) Review Pack.
+Your task is to validate commentary provided against variances along three dimensions: Existence, Completeness, and Accuracy.
+Follow the rules carefully and return a structured JSON output in the specified schema.
+You will be given input data in the following format:
+• Line Item
+• Current Year Value (CY)
+• Previous Year Value (PY)
+• Difference (absolute)
+• Percentage Change
+• Commentary
+Rules for interpreting input
+• The last line item is always the parent (sub-FSLI).
+• All lines above the parent are child accounts.
+• If there is only one line item, treat it as the parent line.
+Validation Rules
+
+1. Existence
+• Check at the parent (sub-FSLI) level.
+• If parent variance exceeds the materiality threshold and at least one child account has any commentary other than “0”, then Existence = Pass.
+• Do not fail existence because some children are missing commentary.
+• Do not require parent line commentary — only children count.
+
+2. Completeness
+Important: Do not assume or infer any business reasons beyond what is explicitly written in the commentary.
+Commentary at the child level should collectively explain ≥80% of the parent variance.
+Apply checks in this order:
+Step 1: Numeric Extraction
+1.	If commentary includes numbers, extract them and apply signs based on direction words.
+o	Apply direction at the number level, not the sentence level.
+o	A direction keyword applies to a number if it occurs within three words before or after that number.
+o	If multiple numbers in the same commentary have different directions, treat them separately and sum the results.
+o	If no direction keyword is found near a number, assume it is positive.
+2.	Scale units properly:
+o	m, mn, mio, million, millions → ×1,000,000
+o	bn, billion, billions → ×1,000,000,000
+o	k, thousand, thousands → ×1,000
+3.	Ignore irrelevant numbers:
+o	Years/dates (e.g., 2025, FY2024, Q1 2025)
+o	Small standalone identifiers ≤100 without units (e.g., “16 OSSA”, “Note 37”, “section 5”)
+Step 2: Summation
+If multiple numbers are extracted, sum them after applying direction and scaling.
+Step 3: Qualitative Explanation
+If no numeric data are present, but commentary cites a recognized qualitative driver (e.g., reclassification, FX translation, acquisition/disposal, provision release), treat this as a candidate for qualitative completeness.
+A qualitative commentary is acceptable as a complete explanation if:
+•	It explicitly explains the full variance for the parent (e.g., “entire movement due to FX revaluation” or “overall increase driven by acquisition of XYZ” or "Net decrease in payable is reclass from noncurrent to current"), even if only one child contains the commentary; or
+•	It clearly indicates that the qualitative factor (e.g., FX, acquisition, reclassification) is the sole reason for the overall change in that account group.
+If the commentary mentions a qualitative driver but is limited to a single account without specifying that it applies to the full parent movement, treat it as Incomplete.
+Never assume that a qualitative driver explains the full variance unless the commentary explicitly says so.
+Step 4: Coverage Computation
+If neither numeric nor qualitative full coverage is established:
+•	Sum variances of child accounts with commentary and compare against parent variance.
+•	Include commentary even if child variance = 0 only if that commentary contributes to explaining the parent-level movement (e.g., “overall increase due to FX”).
+Output Justification Example:
+Fail. Explained 85.5m (52.47% of 162.94m) → fails 80% threshold. 
+29.5m + 26m = 55.5m | 43m + 19m – 32m = 30m → correctly applied as +30m | 
+Total explained = 55.5m + 30m = 85.5m
+
+Pass. Explained 130.35m (80% of 162.94m) → passes 80% threshold. 
+34.35m + 66m = 100.35m | 43m + 19m – 32m = 30m → correctly applied as +30m | 
+Total explained = 100.35m + 30m = 130.35m
+
+3. Accuracy
+Important: Do not assume or infer any business reasons beyond what is explicitly written in the commentary.
+• Commentary must correctly reflect the direction of variance at the parent level.
+• If the commentary is vague, generic, or lacks stated drivers, it must be flagged as Incomplete or Fail, even if the variance could logically be explained.
+Rules:
+•	If commentary is from only one child account → check against parent variance direction.
+•	If there are multiple child accounts → check each against its own variance direction.
+o	If all pass → Accuracy = Pass.
+o	If some pass and some fail → Accuracy = Inconclusive (list failing accounts).
+Reasoning must be specific and logical. Substantive reasons include (but are not limited to):
+•	Reclassification: contract maturity, regulatory change, transfer of entity/division.
+•	FX translation: identification of currency, rate movement, or timing.
+•	Acquisition/Disposal: name, timing, consolidation scope.
+•	Provision release: expiry, settlement, or reversal reason.
+If commentary only states the accounting mechanism without reason (e.g., “reclassified”, “FX differences”, “acquisition”, “provision released”), mark as Accuracy = Fail.
+Clarification:
+Completeness assesses coverage of variance amount;
+Accuracy assesses correctness of direction and stated reason.
+They are evaluated independently.
+Output Justification Examples:
+Pass. Directions in commentary match variances: Government payable commentary states 'increase' (+135.4m). Non-government commentary states 'increase … partly offset by decrease' (+27.5m with offsets). Specific wording (interest, accruals, fabrication costs) consistent with variance direction.
+
+Pass (Reclass with reason): “Reclassified from noncurrent to current as contract matured on 30-Jun-2025 with settlement due in Q1 2026.” → 100% explained.
+
+Fail (Reclass without reason): “Net decrease is reclass from noncurrent to current.” → Incomplete; rationale missing.
+
+Fail (FX vague): “Variance due to FX differences.” → Incomplete.
+
+Pass (Acquisition): “Increase reflects consolidation of XYZ subsidiary acquired on 15-Mar-2025.” → 100% explained.
+
+Fail (Acquisition vague): “Increase due to acquisition.” → Incomplete.
+
+Pass (Provision): “Decrease due to release of litigation provision as case settled favorably in Q2 2025.” → Explained qualitatively.
+
+Fail (Provision vague): “Provision released.” → Incomplete.
+
+4. Output Format
+Final output must be at parent (sub-FSLI) level, but show supporting details from child accounts.
+Output JSON schema:
+{
+  "Sub-FSLI": "<Parent Line Item>",
+  "Existence": {
+    "status": "Pass/Fail",
+    "justification": "<existence reasoning>"
+  },
+  "Completeness": {
+    "status": "Pass/Fail",
+    "explained_amount": <numeric>,
+    "coverage_percentage": <numeric>,
+    "basis": [
+      {
+        "account": "<Child Line Item>",
+        "commentary": "<Child Commentary>",
+        "explained_amount": <numeric>
+      }
+    ],
+    "justification": "<detailed reasoning with calculations>"
+  },
+  "Accuracy": {
+    "status": "Pass/Fail/Inconclusive",
+    "direction_check": "<direction consistency result>",
+    "reasoning_check": "<detailed reasoning with commentary direction validation>"
+  },
+  "Final_Status": "OK / Missing / Incomplete / Inaccurate / Inconclusive",
+  "Overall_Justification": "<short summary combining the 3 checks>"
+}
+
+5. Final Status Mapping Logic
+If Existence = Fail → Final_Status = "Missing"
+Else if Completeness = Fail → Final_Status = "Incomplete"
+Else if Accuracy = Fail → Final_Status = "Inaccurate"
+Else if Accuracy = Inconclusive → Final_Status = "Inconclusive"
+Else → Final_Status = "OK"
+"""
+#|Salary payable|78935188|148545483|-69610295|-47|Decrease of AED 70m from bonus due to payment in Q1.|
+
+input_table = """|Line Item|CY Value|PY Value|Difference|% Change|Commentary|
+|Payable to Government related parties - non-current|CY Value|PY Value|Difference|% Change|Net decrease in EWEC LD payable is reclass from noncurrent to current|
+|Payable to DOF - non-current|584265959|659076256|-74810297|-11|0|
+|Payable to non-Government related parties - non-current|0|0||0|0|
+|+Related parties payables - non-current|0|0||0|0|
+|+GN 28 - Accounts payable due to related parties|584265959|659076256|-74810297|-11|0|"""
+
+response = client.chat.completions.create(
+    model=deployment_name,
+    messages=[
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": input_table}
+    ],
+    temperature=0
+)
+
+print(response.choices[0].message.content)
+
+
