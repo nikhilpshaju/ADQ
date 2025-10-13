@@ -1,0 +1,18 @@
+from openpyxl import load_workbook
+from openpyxl.workbook.calc_props import CalcProperties
+
+def enable_auto_calc(file_in, file_out):
+    wb = load_workbook(file_in)
+
+    # Check if _calcPr exists, if not, create one
+    if not hasattr(wb, '_calcPr') or wb._calcPr is None:
+        wb._calcPr = CalcProperties(calcMode='auto', fullCalcOnLoad=True)
+    else:
+        wb._calcPr.calcMode = 'auto'
+        wb._calcPr.fullCalcOnLoad = True
+
+    wb.save(file_out)
+    print(f"Saved workbook with automatic calculation: {file_out}")
+
+# Example usage
+enable_auto_calc('input.xlsx', 'output_auto_calc.xlsx')
