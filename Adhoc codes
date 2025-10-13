@@ -191,3 +191,64 @@ def set_calc_mode_auto(xlsx_path, output_path):
 
 # ✅ Usage
 set_calc_mode_auto('input_workbook.xlsx', 'output_workbook_auto_calc.xlsx')
+
+
+
+
+
+
+import zipfile
+import shutil
+import os
+from lxml import etree
+
+def set_calc_mode_auto(xlsx_path, output_path):
+    temp_dir = 'temp_xlsx'
+
+    # Clean up and create temp dir
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir)
+
+    # Step 1: Extract
+    with zipfile.ZipFile(xlsx_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+
+    # Step 2: Modify workbook.xml
+    workbook_xml = os.path.join(temp_dir, 'xl', 'workbook.xml')
+    parser = etree.XMLParser(remove_blank_text=True)
+    tree = etree.parse(workbook_xml, parser)
+    root = tree.getroot()
+
+    ns_uri = root.tag[root.tag.find("{")+1 : root.tag.find("}")]
+    nsmap = {'ns': ns_uri}
+
+    # Step 3: Find/create workbookPr
+    workbookPr = root.find('ns:workbookPr', namespaces=nsmap)
+    if workbookPr is None:
+        workbookPr = etree.Element(f'{{{ns_uri}}}workbookPr')
+        root.insert(0, workbookPr)
+
+    # Step 4: Set calcMode and cleanup other attributes
+    workbookPr.attrib.clear()  # clear all attributes
+    workbookPr.set('calcMode', 'auto')
+
+    # Optional: Add Excel default calcId (can help with Excel Online)
+    workbookPr.set('calcId', '122211')  # example value from new Excel files
+
+    # Step 5: Write back
+    tree.write(workbook_xml, pretty_print=True, xml_declaration=True, encoding='UTF-8')
+
+    # Step 6: Re-zip to output_path
+    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
+        for root_dir, dirs, files in os.walk(temp_dir):
+            for file in files:
+                abs_path = os.path.join(root_dir, file)
+                rel_path = os.path.relpath(abs_path, temp_dir)
+                zip_out.write(abs_path, rel_path)
+
+    # Step 7: Cleanup
+    shutil.rmtree(temp_dir)
+
+# Example usage (paths must point to accessible Lakehouse or OneLake locations)
+set_calc_mode_auto('input_workbook.xlsx', 'output_workbook_auto_calc.xlsx')
