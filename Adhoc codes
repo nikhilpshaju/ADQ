@@ -16,3 +16,57 @@ def enable_auto_calc(file_in, file_out):
 
 # Example usage
 enable_auto_calc('input.xlsx', 'output_auto_calc.xlsx')
+
+
+
+
+import zipfile
+import shutil
+import os
+from lxml import etree
+
+def set_calc_mode_auto(xlsx_path, output_path):
+    temp_dir = 'temp_xlsx'
+    
+    # 1. Extract the XLSX contents to a temp directory
+    with zipfile.ZipFile(xlsx_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+    
+    # 2. Path to the workbook.xml inside extracted folder
+    workbook_xml_path = os.path.join(temp_dir, 'xl', 'workbook.xml')
+    
+    # 3. Parse workbook.xml with lxml
+    parser = etree.XMLParser(remove_blank_text=True)
+    tree = etree.parse(workbook_xml_path, parser)
+    root = tree.getroot()
+    
+    # 4. Find workbookPr element and update calcMode attribute
+    # Excel namespace
+    ns = {'ns': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+    workbookPr = root.find('ns:workbookPr', ns)
+    
+    if workbookPr is None:
+        # If not found, create it
+        workbookPr = etree.Element('{http://schemas.openxmlformats.org/spreadsheetml/2006/main}workbookPr')
+        root.insert(0, workbookPr)
+    
+    # Set calcMode attribute to auto
+    workbookPr.set('calcMode', 'auto')
+    
+    # 5. Write back the modified XML
+    tree.write(workbook_xml_path, pretty_print=True, xml_declaration=True, encoding='UTF-8')
+    
+    # 6. Re-zip the folder contents into a new XLSX file
+    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
+        for foldername, subfolders, filenames in os.walk(temp_dir):
+            for filename in filenames:
+                file_path = os.path.join(foldername, filename)
+                # archive name should be relative to temp_dir
+                archive_name = os.path.relpath(file_path, temp_dir)
+                zip_out.write(file_path, archive_name)
+    
+    # 7. Cleanup temp directory
+    shutil.rmtree(temp_dir)
+
+# Usage example
+set_calc_mode_auto('input_workbook.xlsx', 'output_workbook_auto_calc.xlsx')
