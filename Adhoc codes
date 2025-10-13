@@ -128,3 +128,66 @@ def set_calc_mode_auto(xlsx_path, output_path):
 # Usage
 set_calc_mode_auto('input_workbook.xlsx', 'output_workbook_auto_calc.xlsx')
 
+
+
+
+
+import zipfile
+import shutil
+import os
+from lxml import etree
+
+def set_calc_mode_auto(xlsx_path, output_path):
+    temp_dir = 'temp_xlsx'
+    
+    # Clean temp dir if it exists
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir)
+
+    # Step 1: Extract the .xlsx contents
+    with zipfile.ZipFile(xlsx_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_dir)
+
+    # Step 2: Path to workbook.xml
+    workbook_xml_path = os.path.join(temp_dir, 'xl', 'workbook.xml')
+
+    # Step 3: Parse workbook.xml
+    parser = etree.XMLParser(remove_blank_text=True)
+    tree = etree.parse(workbook_xml_path, parser)
+    root = tree.getroot()
+
+    # Step 4: Extract the namespace dynamically
+    ns_uri = root.tag[root.tag.find("{")+1 : root.tag.find("}")]
+    nsmap = {'ns': ns_uri}
+
+    # Step 5: Find or create <workbookPr>
+    workbookPr = root.find('ns:workbookPr', namespaces=nsmap)
+    if workbookPr is None:
+        workbookPr = etree.Element(f'{{{ns_uri}}}workbookPr')
+        root.insert(0, workbookPr)
+
+    # Step 6: Set or update calcMode to "auto"
+    workbookPr.set('calcMode', 'auto')
+
+    # Optional: Remove manual-related flags that force manual behavior
+    for attr in ['fullCalcOnLoad', 'forceFullCalc']:
+        if attr in workbookPr.attrib:
+            del workbookPr.attrib[attr]
+
+    # Step 7: Save the modified workbook.xml
+    tree.write(workbook_xml_path, pretty_print=True, xml_declaration=True, encoding='UTF-8')
+
+    # Step 8: Repackage everything into a new .xlsx file
+    with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
+        for foldername, subfolders, filenames in os.walk(temp_dir):
+            for filename in filenames:
+                file_path = os.path.join(foldername, filename)
+                archive_name = os.path.relpath(file_path, temp_dir)
+                zip_out.write(file_path, archive_name)
+
+    # Step 9: Cleanup
+    shutil.rmtree(temp_dir)
+
+# ✅ Usage
+set_calc_mode_auto('input_workbook.xlsx', 'output_workbook_auto_calc.xlsx')
