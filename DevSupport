@@ -1,4 +1,9 @@
 
+df = pd.DataFrame(fileList)
+
+df.to_parquet("abfss://8c1be8e1-4641-46d1-b7c5-795b5a30dc98@onelake.dfs.fabric.microsoft.com/86f3642e-2487-434f-89d2-253cf1ea3687/Files/varibles/file_list.parquet", index=False)
+
+
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
