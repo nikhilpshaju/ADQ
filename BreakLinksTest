@@ -71,18 +71,19 @@ def clean_excel_file_preserve_internal_dropdowns(input_path, output_path, sheet_
                 root.remove(rel)
         tree.write(rels_path, xml_declaration=True, encoding='utf-8')
 
-    # STEP 4: Remove externalReferences and named ranges with external refs
+    # STEP 4: Remove externalReferences and named ranges with external refs, and set calculation mode
     workbook_path = os.path.join(temp_dir, 'xl', 'workbook.xml')
     if os.path.exists(workbook_path):
         ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
         tree = etree.parse(workbook_path)
         root = tree.getroot()
 
+        # Remove external references
         ext_refs = root.find('main:externalReferences', namespaces=ns)
         if ext_refs is not None:
             root.remove(ext_refs)
-        #tree.write(workbook_path, xml_declaration=True, encoding='utf-8')
-        
+
+        # Remove external named ranges
         defined_names = root.find('main:definedNames', namespaces=ns)
         if defined_names is not None:
             for defined_name in list(defined_names):
@@ -91,8 +92,16 @@ def clean_excel_file_preserve_internal_dropdowns(input_path, output_path, sheet_
             if len(defined_names) == 0:
                 root.remove(defined_names)
 
-        tree.write(workbook_path, xml_declaration=True, encoding='utf-8')
+        # ✅ Add or modify calcPr node to force auto calculation
+        calc_pr = root.find('main:calcPr', namespaces=ns)
+        if calc_pr is None:
+            calc_pr = etree.SubElement(root, '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}calcPr')
 
+        calc_pr.set('calcMode', 'auto')
+        calc_pr.set('fullCalcOnLoad', '1')
+        calc_pr.set('calcId', '162913')  # Any positive number; Excel overwrites this
+
+        tree.write(workbook_path, xml_declaration=True, encoding='utf-8')
 
     # STEP 5: Remove calcChain.xml
     calc_chain_path = os.path.join(temp_dir, 'xl', 'calcChain.xml')
