@@ -1,0 +1,144 @@
+import csv
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from collections import defaultdict
+
+# Step 1: File paths 
+csv_file_path1 = "Source_CSV.csv"
+csv_file_path2 = "deltaCSV.csv"
+output_file = "Out.xlsx"
+
+# Step 2: Create workbook and sheets
+wb_out = Workbook()
+ws_fp = wb_out.active
+ws_fp.title = "SoFP - Commentary"
+ws_slp = wb_out.create_sheet(title="SoPL - Commentary")
+
+# Step 3: Set column widths for better wrapping
+ws_fp.column_dimensions['I'].width = 60
+ws_slp.column_dimensions['I'].width = 60
+
+# Step 4: Styles
+default_font = Font(name="Tahoma", size=9)
+bold_font = Font(name="Tahoma", size=9, bold=True)
+fill_gray = PatternFill(start_color="BBBBBB", end_color="BBBBBB", fill_type="solid")
+align_center = Alignment(horizontal="center", vertical="center")
+align_left = Alignment(horizontal="left", vertical="center")
+thin_border = Border(
+    left=Side(style="thin"),
+    right=Side(style="thin"),
+    top=Side(style="thin"),
+    bottom=Side(style="thin")
+)
+
+# Helper function to apply border to a range
+def set_border_range(ws, start_row, end_row, start_col, end_col, border):
+    for r in range(start_row, end_row + 1):
+        for c in range(start_col, end_col + 1):
+            ws.cell(row=r, column=c).border = border
+
+# Step 5: Function to write CSV to a sheet
+def write_csv_to_sheet(csv_path, ws):
+    # === Headers ===
+    ws.cell(row=3, column=2, value="CONSOLIDATED STATEMENT OF FINANCIAL POSITION").font = bold_font
+    ws.cell(row=6, column=3, value="2025").font = bold_font
+    ws.cell(row=6, column=4, value="2024").font = bold_font
+    ws.cell(row=6, column=5, value="Difference").font = bold_font
+    ws.cell(row=6, column=6, value="Difference (in %)").font = bold_font
+    ws.cell(row=6, column=7, value="Category").font = bold_font
+    ws.cell(row=6, column=8, value="AED millions").font = bold_font
+    ws.cell(row=6, column=9, value="Comments").font = bold_font
+    ws.cell(row=7, column=3, value="AED' million").font = bold_font
+    ws.cell(row=7, column=4, value="AED' million").font = bold_font
+
+    # Gray fill and center alignment for header rows
+    for r in range(6, 9):
+        for c in range(2, 10):
+            cell = ws.cell(row=r, column=c)
+            cell.fill = fill_gray
+            cell.alignment = align_center
+            cell.font = bold_font
+
+    # Read CSV with multiline handling 
+    csv_data = []
+    with open(csv_path, newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile, delimiter='|', quotechar='"', escapechar='\\')
+        for row in reader:
+            csv_data.append(row)
+
+    # Group by line_item
+    groups = defaultdict(list)
+    for row in csv_data:
+        groups[row['line_item']].append(row)
+
+    # Write data starting from row 9 
+    current_row = 9
+    for line_item, rows in groups.items():
+        current_val = rows[0]['current']
+        prior_val = rows[0]['prior']
+        diff_val = rows[0]['difference']
+        diff_pct = rows[0]['difference_percentage']
+        num_rows = len(rows)
+
+        # Merge line_item column B (no bold)
+        ws.merge_cells(start_row=current_row, end_row=current_row+num_rows+1, start_column=2, end_column=2)
+        b_cell = ws.cell(row=current_row, column=2, value=line_item)
+        b_cell.alignment = align_center
+        b_cell.font = default_font
+        set_border_range(ws, current_row, current_row+num_rows+1, 2, 2, thin_border)
+
+        # Merge Câ€“F columns
+        for col, val in zip(range(3, 7), [current_val, prior_val, diff_val, diff_pct]):
+            ws.merge_cells(start_row=current_row, end_row=current_row+num_rows+1, start_column=col, end_column=col)
+            c_cell = ws.cell(row=current_row, column=col, value=val)
+            c_cell.alignment = align_center
+            c_cell.font = default_font
+            set_border_range(ws, current_row, current_row+num_rows+1, col, col, thin_border)
+
+        # Overall row
+        ws.merge_cells(start_row=current_row, end_row=current_row, start_column=7, end_column=8)
+        overall_cell = ws.cell(row=current_row, column=7, value="Overall")
+        overall_cell.font = bold_font
+        overall_cell.alignment = align_center
+        set_border_range(ws, current_row, current_row, 2, 9, thin_border)
+        current_row += 1
+
+
+        # Entity rows
+        total = 0
+        for r in rows:
+            entity = r['entity']
+            diff_amt = float(r['difference'])
+            comment = r['comment']
+
+            ws.cell(row=current_row, column=7, value=entity).font = default_font
+            ws.cell(row=current_row, column=8, value=diff_amt).font = default_font
+
+            # Wrap comments properly in column I
+            wrap_align = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            ws.cell(row=current_row, column=9, value=comment).font = default_font
+            ws.cell(row=current_row, column=9).alignment = wrap_align
+
+            # G/H center
+            ws.cell(row=current_row, column=7).alignment = align_center
+            ws.cell(row=current_row, column=8).alignment = align_center
+
+            set_border_range(ws, current_row, current_row, 2, 9, thin_border)
+            total += diff_amt
+            current_row += 1
+
+        # Total row (bold)
+        ws.cell(row=current_row, column=7, value="Total").font = bold_font
+        ws.cell(row=current_row, column=8, value=total).font = bold_font
+        ws.cell(row=current_row, column=7).alignment = align_center
+        ws.cell(row=current_row, column=8).alignment = align_center
+        set_border_range(ws, current_row, current_row, 2, 9, thin_border)
+        current_row += 1
+
+# Step 6: Write both CSVs 
+write_csv_to_sheet(csv_file_path1, ws_fp)
+write_csv_to_sheet(csv_file_path2, ws_slp)
+
+# Step 7: Save workbook 
+wb_out.save(output_file)
+print("Output saved into:", output_file)
