@@ -1,0 +1,144 @@
+
+!pip install pandas openpyxl
+!pip install deltalake pandas
+
+
+
+
+
+import pandas as pd
+from pyspark.sql import SparkSession
+from deltalake import write_deltalake, DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StringType, StructField
+from pyspark.sql.window import Window
+
+
+
+
+
+#Latest code - - Code for loading data from excel to tables
+
+# Path to Excel file in Lakehouse Files
+#excel_path = "abfss://b74ee0ac-c42f-4c9d-be97-62f6f20d87f1@onelake.dfs.fabric.microsoft.com/1aeac658-239d-4d53-af2b-14eb64c18a19/Files/MS1/Processing/Q2 FS Review Pack - Etihad Aviation_MS1_Preprocessed.xlsx"
+# display(excel_path)
+
+schema = StructType([
+StructField("note_no", StringType(), True),StructField("fsli", StringType(), True),StructField("current_amount_1", StringType(), True),
+    StructField("current_amount_2", StringType(), True),StructField("current_difference", StringType(), True),
+    StructField("current_validation", StringType(), True),StructField("prior_amount_1", StringType(), True),
+    StructField("prior_amount_2", StringType(), True),StructField("prior_difference", StringType(), True),
+    StructField("prior_validation", StringType(), True),StructField("description", StringType(), True),
+    StructField("section", StringType(), True),StructField("row_no", StringType(), True),])
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("ExcelToDeltaWithMetastore") \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+    .enableHiveSupport() \
+.getOrCreate()
+
+# Read all sheets
+tabs = pd.read_excel(excel_path, dtype =str , keep_default_na=False,na_values=[], sheet_name=None, engine='openpyxl')
+#display(tabs)
+
+for tabname, df in tabs.items():
+    print(tabname)
+    print(f"\n🔄 Processing sheet: {tabname}")
+    #display(df)
+
+    # Validate headers
+    if df.columns.isnull().any():
+        print(f"❌ Skipping '{tabname}': Missing column headers.")
+        continue
+    # Validate and clean unsupported data types
+    for col in df.columns:
+        if df[col].dtype not in ['int64', 'float64', 'bool', 'datetime64[ns]','object']:
+            print(f"⚠️ Column '{col}' in '{tabname}' has unsupported type '{df[col].dtype}'. Converting to string.")
+            df[col] = df[col].astype(str)
+
+    # Try converting to Spark DataFrame
+    try:
+        if tabname == "Validations_NEW":
+            sdf = spark.createDataFrame(df,schema = schema)
+            #sdf.printSchema()
+        else:
+            sdf = spark.createDataFrame(df)
+            #sdf.printSchema()
+    except Exception as e:
+        print(f"❌ Error converting '{tabname}' to Spark DataFrame: {e}")
+        continue
+
+    # Clean sheet name for table naming
+
+    tablename = "raw_" + tabname.lower().strip().replace("_new","").replace(" ", "").replace("-", "_").replace(".","_")
+    #tablename = "raw_column_reference"
+    tabtable = "/lakehouse/default/Tables/"+tablename
+    display(tabtable)
+
+
+    # Try writing to Lakehouse
+    try:
+        spark.sql(f"""TRUNCATE TABLE {tablename}""")
+
+        sdf.write.mode("overwrite").format("delta").saveAsTable(tablename)
+        #New code
+        spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {tablename}
+        USING DELTA
+        LOCATION '{tabtable}'
+        """)
+        #New code end
+        print(f"✅ Created table: {tablename}")
+    except Exception as e:
+        print(f"❌ Error writing table '{tablename}': {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Code for loading data from raw schema to ods schema for gn28
+
+
+# Step 2: Define source and target paths
+source_path = sourceabfspath+ "/Tables/raw_gn_28"  # Update path
+target_path = targetabfspath+"/Tables/ods_gn_28"  # New table path
+
+# 1. Load existing table to get current max ID
+
+try:
+
+    #target_df = spark.read.format("delta").load(target_path)
+    
+    # Extract numeric part of ID and convert to integer
+    #max_id_str = target_df.select(F.max("id")).collect()[0][0]
+    max_id_str = spark.read.format("delta").load(target_path).select(F.max("id")).collect()[0][0]
+    max_id_num = int(max_id_str.replace("gn28", "")) if max_id_str else 0
+except:
+    max_id_num = 0
+display(max_id_num)
+# 3. Add row number and generate alphanumeric ID
+existing_df = spark.read.format("delta").load(source_path)
+window = Window.orderBy(F.monotonically_increasing_id())
+new_data_with_rownum = existing_df.withColumn("row_num", F.row_number().over(window))
+new_data_with_id = new_data_with_rownum.withColumn(
+    "id", 
+    F.concat(F.lit("gn28"), F.format_string("%06d", F.col("row_num") + F.lit(max_id_num)))
+    #F.concat(F.lit("va"), (F.col("row_num") + F.lit(max_id_num)))
+).withColumn("txnID", F.lit(txnID)).drop("row_num")
+
+#new_data_with_id.show()
+# Step 5: Write filtered data to a new Delta table
+new_data_with_id.write.format("delta") \
+    .mode("append") \
+    .save(target_path)
