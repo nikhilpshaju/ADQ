@@ -184,3 +184,68 @@ print(f" AI input CSV saved at: {ai_output_csv_path}")
 
 
 
+
+
+# final AI to table output 
+
+
+# 1. Setup Spark session and define file paths
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+
+spark = SparkSession.builder.getOrCreate()
+
+json_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/finaljson/all_results.json"
+)
+
+existing_table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/rule4_gn_28"
+)
+
+new_table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/AIIrule_gn28"
+)
+
+
+# 2. Read the JSON validation result
+json_df = spark.read.option("multiline", True).json(json_path)
+
+# 3. Extract and rename columns with AI_ prefix to avoid duplication
+flattened_df = (
+    json_df.select(
+        col("Sub-FSLI").alias("fsli"),
+
+        col("Existence.status").alias("Existence_Status"),
+        col("Existence.justification").alias("Existence_Justification"),
+
+        col("Completeness.status").alias("Completeness_Status"),
+        col("Completeness.justification").alias("Completeness_Justification"),
+
+        col("Accuracy.status").alias("Accuracy_Status"),
+        col("Accuracy.reasoning_check").alias("Accuracy_Justification"),
+
+        col("Overall_Justification").alias("Overall_Justification"),
+        col("Remarks").alias("final_remarks")
+    )
+)
+
+# 4. Read existing Fabric table
+existing_df = spark.read.format("delta").load(existing_table_path)
+
+# 5. Join JSON data with existing table on fsli
+merged_df = (
+    existing_df.join(
+        flattened_df,
+        existing_df["fsli"] == flattened_df["fsli"],
+        how="left"
+    )
+    .drop(flattened_df["fsli"])
+)
+
+# 6. Save merged data as a NEW Delta table
+merged_df.write.format("delta").mode("overwrite").save(new_table_path)
+
