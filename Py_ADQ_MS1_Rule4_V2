@@ -1,0 +1,232 @@
+
+#final gn28
+
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+# Define input and output paths
+input_table_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_gn_28"
+output_table_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/rule4_gn_28"
+
+# Load source table from abfss path (assuming Delta format)
+df = spark.read.format("delta").load(input_table_path)
+
+# Cast 'difference' and 'pc_change' to numeric
+df = df.withColumn("difference", F.col("difference").cast("double"))
+df = df.withColumn("pc_change", F.col("pc_change").cast("double"))
+
+# Exclude specific fsli values
+excluded_fsli = [
+    "at period end",
+    "current",
+    "",
+    "as per sofp",
+    "non-current &amp; current total",
+    "validation",
+    "non-current"
+]
+
+df = df.filter(~F.lower(F.trim(F.col("fsli"))).isin(excluded_fsli))
+
+# Reverse order and mark GN 28 rows
+df = df.withColumn("reverse_row_no", F.row_number().over(Window.orderBy(F.col("row_no").desc())))
+df = df.withColumn("is_gn28", F.col("fsli").startswith("+GN 28"))
+
+# Create block ID using cumulative sum
+df = df.withColumn("block_id", F.sum(F.when(F.col("is_gn28"), 1).otherwise(0)).over(
+    Window.orderBy("reverse_row_no").rowsBetween(Window.unboundedPreceding, 0)
+))
+
+# Define fail conditions
+fail_condition_1 = F.col("difference") > 10_000_000
+fail_condition_2 = (F.col("pc_change") > 10) & (F.col("difference") >= 5_000_000)
+fail_condition = fail_condition_1 | fail_condition_2
+
+# Add pass/fail flag (only show "Fail", keep blank for "Pass")
+df = df.withColumn("pass_fail_flag", F.when(fail_condition, "Fail").otherwise("Pass"))
+
+# Add remark column with actual values for failed rows, null for passed
+df = df.withColumn(
+    "remark",
+    F.when(
+        fail_condition_1,
+        F.concat(
+            F.lit("Amount exceeds threshold. difference="),
+            F.concat(F.round(F.col("difference") / 1_000_000, 2), F.lit("M"))
+        )
+    ).when(
+        fail_condition_2,
+        F.concat_ws(
+            ", ",
+            F.lit("% Change and Amount exceed thresholds."),
+            F.concat(F.lit("pc_change="), F.round(F.col("pc_change"), 2)),
+            F.concat(F.lit("difference="), F.concat(F.round(F.col("difference") / 1_000_000, 2), F.lit("M")))
+        )
+    ).otherwise(F.lit(None))
+)
+commentary_df = df.filter(
+    F.trim(F.col("current_period_commentary")).isNotNull() &
+    (F.trim(F.col("current_period_commentary")) != "") &
+    (F.trim(F.col("current_period_commentary")) != "0")
+).groupBy("block_id").agg(
+    F.concat_ws(" || ", F.collect_list("current_period_commentary")).alias("current_period_commentary")
+)
+
+
+# Drop commentary from main df to avoid ambiguity during join
+df = df.drop("current_period_commentary")
+
+
+
+result_df = df.filter(F.col("fsli").startswith("+GN 28")) \
+    .join(commentary_df, on="block_id", how="left") \
+    .select(
+        "id",
+        "txnID",
+        "fsli",
+        "difference",
+        "pc_change",
+        "current_period_commentary",
+        "row_no",
+        "pass_fail_flag",
+        "remark"
+    )
+# Save result to Lakehouse (Delta format)
+result_df.write.format("delta").mode("overwrite").save(output_table_path)
+
+
+# Drop commentary from main df to avoid ambiguity during join
+df = df.drop("current_period_commentary")
+
+
+
+result_df = df.filter(F.col("fsli").startswith("+GN 28")) \
+    .join(commentary_df, on="block_id", how="left") \
+    .select(
+        "id",
+        "txnID",
+        "fsli",
+        "difference",
+        "pc_change",
+        "current_period_commentary",
+        "row_no",
+        "pass_fail_flag",
+        "remark"
+    )
+# Save result to Lakehouse (Delta format)
+result_df.write.format("delta").mode("overwrite").save(output_table_path)
+
+
+
+#converting ods table to csv for providing  AI input 
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lower, trim
+
+# Initialize Spark session
+spark = SparkSession.builder.getOrCreate()
+
+# Define the ABFS path to your Delta table
+delta_table_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ods_gn_28"
+
+# Define the output path for the CSV file
+csv_output_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/ods_gn_28_csv"
+
+# Read the Delta table
+df = spark.read.format("delta").load(delta_table_path)
+
+# List of fsli values to exclude (all lowercase, trimmed)
+excluded_fsli = [
+    "at period end",
+    "current",
+    "",
+    "as per sofp",
+    "non-current & current total",
+    "validation",
+    "non-current"
+]
+
+# Normalize fsli column and filter
+filtered_df = (
+    df.filter(~lower(trim(col("fsli"))).isin(excluded_fsli))
+      .orderBy("row_no")
+)
+
+# Write the filtered and sorted DataFrame to CSV
+filtered_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(csv_output_path)
+
+
+
+
+
+
+# final AI to table output 
+
+
+# 1. Setup Spark session and define file paths
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+
+spark = SparkSession.builder.getOrCreate()
+
+json_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/finaljson/all_results.json"
+)
+
+existing_table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/rule4_gn_28"
+)
+
+new_table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/AIIrule_gn28"
+)
+
+
+# 2. Read the JSON validation result
+json_df = spark.read.option("multiline", True).json(json_path)
+
+# 3. Extract and rename columns with AI_ prefix to avoid duplication
+flattened_df = (
+    json_df.select(
+        col("Sub-FSLI").alias("fsli"),
+
+        col("Existence.status").alias("Existence_Status"),
+        col("Existence.justification").alias("Existence_Justification"),
+
+        col("Completeness.status").alias("Completeness_Status"),
+        col("Completeness.justification").alias("Completeness_Justification"),
+
+        col("Accuracy.status").alias("Accuracy_Status"),
+        col("Accuracy.reasoning_check").alias("Accuracy_Justification"),
+
+        col("Overall_Justification").alias("Overall_Justification"),
+        col("Remarks").alias("final_remarks")
+    )
+)
+
+# 4. Read existing Fabric table
+existing_df = spark.read.format("delta").load(existing_table_path)
+
+# 5. Join JSON data with existing table on fsli
+merged_df = (
+    existing_df.join(
+        flattened_df,
+        existing_df["fsli"] == flattened_df["fsli"],
+        how="left"
+    )
+    .drop(flattened_df["fsli"])
+)
+
+# 6. Save merged data as a NEW Delta table
+merged_df.write.format("delta").mode("overwrite").save(new_table_path)
+
+
+
+
+
+
+
