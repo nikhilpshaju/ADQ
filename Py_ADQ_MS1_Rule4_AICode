@@ -1077,3 +1077,383 @@ if __name__ == "__main__":
 
 
 
+
+
+
+#testing
+
+import json
+import csv
+import re
+import os
+import fsspec
+import hashlib
+import pandas as pd
+from pathlib import Path
+from typing import List
+
+
+from openai import OpenAI
+from openai import AzureOpenAI
+from pyspark.sql import SparkSession
+
+endpoint = "https://adq-aifoundrytest.cognitiveservices.azure.com/"
+model_name = "gpt-4.1"
+deployment = "gpt-4.1"
+
+subscription_key = "3S7cHqjYzrJ6ribAkimOtQDQUamKkKB21CpXC0ro8NaE1ptRfS7hJQQJ99BHACYeBjFXJ3w3AAAAACOG8Sx9"
+api_version = "2024-12-01-preview"
+
+client = AzureOpenAI(
+    api_version=api_version,
+    azure_endpoint=endpoint,
+    api_key=subscription_key,
+)
+BATCH_SIZE = 50
+RESULTS_DIR = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/jj"
+
+SYSTEM_PROMPT = """
+You are an AI assistant reviewing a Quarterly Financial Statement (FS) Review Pack.
+Your task is to validate commentary provided against variances along three dimensions: Existence, Completeness, and Accuracy.
+Follow the rules carefully and return a structured JSON output in the specified schema.
+You will be given input data in the following format:
+• Line Item
+• Current Year Value (CY)
+• Previous Year Value (PY)
+• Difference (absolute)
+• Percentage Change
+• Commentary
+Rules for interpreting input
+• The last line item is always the parent (sub-FSLI).
+• All lines above the parent are child accounts.
+• If there is only one line item, treat it as the parent line.
+
+IMPORTANT:
+- Return only a valid JSON array of objects.
+- Do NOT add any extra text, explanations, or markdown.
+- Include all child rows under each parent, even if commentary is empty or '0'.
+- Do NOT skip or remove any children.
+
+1. Existence
+• Check at the parent (sub-FSLI) level.
+• If at least one child account has any commentary other than “0”, then Existence = Pass.
+• Do not fail existence because some children are missing commentary.
+• Do not require parent line commentary — only children count.
+
+2. Completeness
+Important: Do not assume or infer any business reasons beyond what is explicitly written in the commentary.
+Commentary at the child level should collectively explain ≥80% of the parent variance.
+Apply checks in this order:
+Step 1: Numeric Extraction
+1.	If commentary includes numbers, extract them and apply signs based on direction words.
+o	Apply direction at the number level, not the sentence level.
+o	A direction keyword applies to a number if it occurs within three words before or after that number.
+o	If multiple numbers in the same commentary have different directions, treat them separately and sum the results.
+o	If no direction keyword is found near a number, assume it is positive.
+2.	Scale units properly:
+o	m, mn, mio, million, millions → ×1,000,000
+o	bn, billion, billions → ×1,000,000,000
+o	k, thousand, thousands → ×1,000
+3.	Ignore irrelevant numbers:
+o	Years/dates (e.g., 2025, FY2024, Q1 2025)
+o	Small standalone identifiers ≤100 without units (e.g., “16 OSSA”, “Note 37”, “section 5”)
+Step 2: Summation
+If multiple numbers are extracted, sum them after applying direction and scaling.
+Step 3: Qualitative Explanation
+If no numeric data are present, but commentary cites a recognized qualitative driver (e.g., reclassification, FX translation, acquisition/disposal, provision release), treat this as a candidate for qualitative completeness.
+A qualitative commentary is acceptable as a complete explanation if:
+•	It explicitly explains the full variance for the parent (e.g., “entire movement due to FX revaluation” or “overall increase driven by acquisition of XYZ” or "Net decrease in payable is reclass from noncurrent to current"), even if only one child contains the commentary; or
+•	It clearly indicates that the qualitative factor (e.g., FX, acquisition, reclassification) is the sole reason for the overall change in that account group.
+If the commentary mentions a qualitative driver but is limited to a single account without specifying that it applies to the full parent movement, treat it as Incomplete.
+Never assume that a qualitative driver explains the full variance unless the commentary explicitly says so.
+Step 4: Coverage Computation
+If neither numeric nor qualitative full coverage is established:
+•	Sum variances of child accounts with commentary and compare against parent variance.
+•	Include commentary even if child variance = 0 only if that commentary contributes to explaining the parent-level movement (e.g., “overall increase due to FX”).
+Output Justification Example:
+Fail. Explained 85.5m (52.47% of 162.94m) → fails 80% threshold. 
+29.5m + 26m = 55.5m | 43m + 19m – 32m = 30m → correctly applied as +30m | 
+Total explained = 55.5m + 30m = 85.5m
+
+Pass. Explained 130.35m (80% of 162.94m) → passes 80% threshold. 
+34.35m + 66m = 100.35m | 43m + 19m – 32m = 30m → correctly applied as +30m | 
+Total explained = 100.35m + 30m = 130.35m
+
+3. Accuracy
+Important: Do not assume or infer any business reasons beyond what is explicitly written in the commentary.
+• Commentary must correctly reflect the direction of variance at the parent level.
+• If the commentary is vague, generic, or lacks stated drivers, it must be flagged as Incomplete or Fail, even if the variance could logically be explained.
+Rules:
+•	If commentary is from only one child account → check against parent variance direction.
+•	If there are multiple child accounts → check each against its own variance direction.
+o	If all pass → Accuracy = Pass.
+o	If some pass and some fail → Accuracy = Inconclusive (list failing accounts).
+Reasoning must be specific and logical. Substantive reasons include (but are not limited to):
+•	Reclassification: contract maturity, regulatory change, transfer of entity/division.
+•	FX translation: identification of currency, rate movement, or timing.
+•	Acquisition/Disposal: name, timing, consolidation scope.
+•	Provision release: expiry, settlement, or reversal reason.
+If commentary only states the accounting mechanism without reason (e.g., “reclassified”, “FX differences”, “acquisition”, “provision released”), mark as Accuracy = Fail.
+Clarification:
+Completeness assesses coverage of variance amount;
+Accuracy assesses correctness of direction and stated reason.
+They are evaluated independently.
+Output Justification Examples:
+Pass. Directions in commentary match variances: Government payable commentary states 'increase' (+135.4m). Non-government commentary states 'increase … partly offset by decrease' (+27.5m with offsets). Specific wording (interest, accruals, fabrication costs) consistent with variance direction.
+
+Pass (Reclass with reason): “Reclassified from noncurrent to current as contract matured on 30-Jun-2025 with settlement due in Q1 2026.” → 100% explained.
+
+Fail (Reclass without reason): “Net decrease is reclass from noncurrent to current.” → Incomplete; rationale missing.
+
+Fail (FX vague): “Variance due to FX differences.” → Incomplete.
+
+Pass (Acquisition): “Increase reflects consolidation of XYZ subsidiary acquired on 15-Mar-2025.” → 100% explained.
+
+Fail (Acquisition vague): “Increase due to acquisition.” → Incomplete.
+
+Pass (Provision): “Decrease due to release of litigation provision as case settled favorably in Q2 2025.” → Explained qualitatively.
+
+Fail (Provision vague): “Provision released.” → Incomplete.
+
+4. Output Format
+Final output must be at parent (sub-FSLI) level, but show supporting details from child accounts.
+Output JSON schema:
+{
+  "Sub-FSLI": "<Parent Line Item>",
+  "Existence": {
+    "status": "Pass/Fail",
+    "justification": "<existence reasoning>"
+  },
+  "Completeness": {
+    "status": "Pass/Fail",
+    "explained_amount": <numeric>,
+    "coverage_percentage": <numeric>,
+    "basis": [
+      {
+        "account": "<Child Line Item>",
+        "commentary": "<Child Commentary>",
+        "explained_amount": <numeric>
+      }
+    ],
+    "justification": "<detailed reasoning with calculations>"
+  },
+  "Accuracy": {
+    "status": "Pass/Fail/Inconclusive",
+    "direction_check": "<direction consistency result>",
+    "reasoning_check": "<detailed reasoning with commentary direction validation>"
+  },
+  "Final_Status": "OK / Missing / Incomplete / Inaccurate / Inconclusive",
+ "Remarks": "Commentary provided is valid/ Commentary is not provided/ Commentary provided is inaccurate and incomplete/ Commentary provided is incomplete/ Commentary provided is inaccurate",
+ "Overall_Justification": "<short summary combining the 3 checks>"
+}
+ 
+5. Final Status Mapping Logic
+If Existence = Fail → Final_Status = "Missing" and Remarks = “Commentary is not provided”
+Else if Completeness = Fail → Final_Status = "Incomplete" and Remarks = “Commentary provided is incomplete”
+Else if Accuracy = Fail → Final_Status = "Inaccurate" and Remarks = “Commentary provided is inaccurate”
+Else if Accuracy = Inconclusive → Final_Status = "Inconclusive" and Remarks = “Commentary provided is Inconclusive”
+Else → Final_Status = "OK" and Remarks = “Commentary provided is valid”
+ 
+ 
+"""
+
+
+def load_and_normalize_csv(csv_path: str):
+    df = pd.read_csv(csv_path)
+    df = df.rename(columns={
+        "fsli": "Line Item",
+        "difference": "Difference",
+        "pc_change": "% Change",
+        "current_period": "CY",
+        "prior_period": "PY",
+        "current_period_commentary": "Commentary"
+    })
+
+    df["Difference"] = pd.to_numeric(df["Difference"], errors="coerce").fillna(0)
+    df["% Change"] = pd.to_numeric(df["% Change"], errors="coerce").fillna(0)
+    df["CY"] = pd.to_numeric(df["CY"], errors="coerce").fillna(0)
+    df["PY"] = pd.to_numeric(df["PY"], errors="coerce").fillna(0)
+
+    normalized_rows = [
+        {
+            "line_item": str(row.get("Line Item", "")).strip(),
+            "cy": float(row["CY"]),
+            "py": float(row["PY"]),
+            "difference": float(row["Difference"]),
+            "pct_change": float(row["% Change"]),
+            "comment": str(row.get("Commentary", "")).strip(),
+        }
+        for _, row in df.iterrows()
+    ]
+    return normalized_rows
+
+
+# ------------------- Correct Parent–Child Grouping -------------------
+def identify_parents_and_children(rows):
+    # Find indices of parents
+    parent_indices = [i for i, r in enumerate(rows) if r["line_item"].startswith("+GN 28 -")]
+    structured = []
+
+    for idx, p_idx in enumerate(parent_indices):
+        parent = rows[p_idx]
+        # Previous parent index (or start of list)
+        prev_p_idx = parent_indices[idx - 1] if idx > 0 else -1
+        # Children are rows **between previous parent and current parent**
+        children = rows[prev_p_idx + 1: p_idx]
+        structured.append({"parent": parent, "children": children})
+
+    return structured
+
+
+# ------------------- Utility -------------------
+def normalize_account_name(name):
+    return re.sub(r'\s+', ' ', name.strip().lower().replace('.', '').replace('-', ''))
+
+def format_rows_with_parent_id(rows, parent_ids):
+    header = "| Parent ID | Parent Name | Line Item | Difference | % Change | Comment |"
+    lines = []
+    for row, pid in zip(rows, parent_ids):
+        lines.append(
+            f"| {pid} | {row.get('parent_name','')} | {row['line_item']} | {row['difference']:.2f} | {row['pct_change']:.2f} | {row['comment']} |"
+        )
+    return header + "\n" + "\n".join(lines)
+
+def save_json_to_onelake(content, parent_name, batch_index):
+    hash_suffix = hashlib.md5(parent_name.encode()).hexdigest()[:8]
+    file_name = f"batch_{batch_index}_{hash_suffix}.json"
+    full_path = f"{RESULTS_DIR}/{file_name}"
+    try:
+        parsed = json.loads(content)
+        with fsspec.open(full_path, "w", encoding="utf-8") as f:
+            json.dump(parsed, f, indent=2, ensure_ascii=False)
+        print(f"Saved JSON for {parent_name} → {full_path}")
+        return parsed
+    except json.JSONDecodeError:
+        error_path = full_path.replace(".json", "_RAW.txt")
+        with fsspec.open(error_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f" Could not parse JSON for {parent_name}. Raw saved → {error_path}")
+        return 
+        
+def parse_json_safely(text):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Remove code fences and extra markdown
+        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        start = text.find("[")
+        end = text.rfind("]") + 1
+        if start != -1 and end != -1:
+            try:
+                return json.loads(text[start:end])
+            except json.JSONDecodeError:
+                return None
+        return None
+
+# ------------------- Run 50 Parents per Batch -------------------
+def run_all_parent_batches(rows, batch_parent_count=50, model=deployment, temperature=TEMPERATURE):
+    parent_groups = identify_parents_and_children(rows)
+    consolidated = []
+
+    for batch_index in range(0, len(parent_groups), batch_parent_count):
+        batch_groups = parent_groups[batch_index: batch_index + batch_parent_count]
+        print(f"\n--- Running batch {batch_index // batch_parent_count + 1} for {len(batch_groups)} parents ---")
+
+        ai_rows, parent_ids = [], []
+        pid = 1
+        for group in batch_groups:
+            parent = group["parent"]
+            children = group["children"]
+            parent["is_parent"] = True
+            parent["parent_name"] = parent["line_item"]
+            ai_rows.append(parent)
+            parent_ids.append(pid)
+            for child in children:
+                child["is_parent"] = False
+                child["parent_name"] = parent["line_item"]
+                ai_rows.append(child)
+                parent_ids.append(pid)
+            pid += 1
+
+        user_message = (
+            "Validate the following financial data in strict JSON format. "
+            "Each child row belongs to the 'Parent ID' specified. "
+            "Do not reassign children to different parents.\n\n"
+            + format_rows_with_parent_id(ai_rows, parent_ids)
+        )
+
+        # --- AI call ---
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=temperature,
+            )
+            result = response.choices[0].message.content
+            # Optional debug preview
+            print("AI output preview:", result[:300])
+        except Exception as e:
+            print(f" AI call failed for batch {batch_index}: {e}")
+            continue
+
+        # --- Parse AI output safely ---
+        parsed = parse_json_safely(result)
+
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        elif not isinstance(parsed, list):
+            print(f" Could not parse AI JSON for batch {batch_index}, saving raw.")
+            save_json_to_onelake(result, f"batch_{batch_index}", batch_index)
+            continue
+
+        for parent_dict in parsed:
+            if not isinstance(parent_dict, dict):
+                print(f" Skipping invalid item in parsed JSON: {parent_dict}")
+                continue
+
+            parent_name = parent_dict.get("Sub-FSLI", "")
+            original_group = next(
+                (g for g in batch_groups if g["parent"]["line_item"] == parent_name),
+                None
+            )
+
+            # Ensure all children are included in Completeness.basis even if commentary is blank
+            if original_group:
+                if "Completeness" not in parent_dict:
+                    parent_dict["Completeness"] = {"basis": []}
+                if "basis" not in parent_dict["Completeness"]:
+                    parent_dict["Completeness"]["basis"] = []
+
+                existing = {normalize_account_name(b["account"]) for b in parent_dict["Completeness"]["basis"]}
+                for child in original_group["children"]:
+                    cname = normalize_account_name(child["line_item"])
+                    if cname not in existing:
+                        parent_dict["Completeness"]["basis"].append({
+                            "account": child["line_item"],
+                            "commentary": child.get("comment", ""),
+                            "explained_amount": 0
+                        })
+
+            consolidated.append(parent_dict)
+
+        # Save parsed JSON for this batch
+        save_json_to_onelake(json.dumps(parsed, indent=2, ensure_ascii=False), f"batch_{batch_index}", batch_index)
+
+    # --- Save all consolidated results ---
+    consolidated_file = f"{RESULTS_DIR}/all_results.json"
+    with fsspec.open(consolidated_file, "w", encoding="utf-8") as f:
+        json.dump(consolidated, f, indent=2, ensure_ascii=False)
+
+    print(f"\nConsolidated results saved to {consolidated_file}")
+    return consolidated
+
+
+# ------------------- MAIN -------------------
+if __name__ == "__main__":
+    csv_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/testing/part-00000-881a9791-14f5-4624-af43-07be9958a37c-c000.csv"
+    rows = load_and_normalize_csv(csv_path)
+    run_all_parent_batches(rows)
+    
