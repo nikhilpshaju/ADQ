@@ -1,0 +1,64 @@
+#final input to csv
+
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.window import Window
+
+spark = SparkSession.builder \
+    .appName("GN28 AI Input Filter") \
+    .config("spark.jars.packages", "io.delta:delta-core_2.12:2.4.0") \
+    .getOrCreate()
+
+table1_path = "abfss://b74ee0ac-c42f-4c9d-be97-62f6f20d87f1@onelake.dfs.fabric.microsoft.com/1aeac658-239d-4d53-af2b-14eb64c18a19/Tables/ods_gn_28"
+table2_path = "abfss://b74ee0ac-c42f-4c9d-be97-62f6f20d87f1@onelake.dfs.fabric.microsoft.com/1aeac658-239d-4d53-af2b-14eb64c18a19/Tables/rule4_gn_28"
+ai_output_csv_path = "abfss://b74ee0ac-c42f-4c9d-be97-62f6f20d87f1@onelake.dfs.fabric.microsoft.com/1aeac658-239d-4d53-af2b-14eb64c18a19/Files/Rule4testing"
+
+df1 = spark.read.format("delta").load(table1_path)
+df2 = spark.read.format("delta").load(table2_path)
+
+joined_df = df1.join(
+    df2.select("id", "txnID", "pass_fail_flag", "remark"),
+    on=((df1["id"] == df2["id"]) & (df1["txnID"] == df2["txnID"])),
+    how="left"
+)
+
+joined_df.show()
+
+joined_df = joined_df.withColumn(
+    "is_parent", F.when(F.col("fsli").startswith("+GN 28"), 1).otherwise(0)
+)
+
+window_spec = Window.orderBy(F.desc("row_no"))
+joined_df = joined_df.withColumn(
+    "reverse_group_id", F.sum("is_parent").over(window_spec.rowsBetween(Window.unboundedPreceding, 0))
+)
+
+failing_groups = joined_df.filter(F.col("pass_fail_flag") == "Pass") \
+                          .select("reverse_group_id").distinct()
+
+ai_input_df = joined_df.join(failing_groups, on="reverse_group_id", how="inner")
+
+excluded_fsli = [
+    "at period end",
+    "current",
+    "",
+    "as per sofp",
+    "non-current & current total",
+    "validation",
+    "non-current"
+]
+
+ai_input_df = ai_input_df.withColumn("fsli_clean", F.lower(F.trim(F.col("fsli"))))
+ai_input_df = ai_input_df.filter(~F.col("fsli_clean").isin(excluded_fsli)).drop("fsli_clean")
+
+ai_input_df = ai_input_df.orderBy("reverse_group_id", "is_parent", "row_no")
+
+ai_input_df = ai_input_df.selectai_input_df = ai_input_df.select(
+    "fsli", "difference", "pc_change",
+    "current_period", "prior_period",  
+    "current_period_commentary"
+)
+
+ai_input_df.coalesce(1).write.mode("overwrite").option("header", True).csv(ai_output_csv_path)
+
+print(f" AI input CSV saved at: {ai_output_csv_path}")
+
