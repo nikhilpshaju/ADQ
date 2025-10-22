@@ -1,0 +1,167 @@
+import csv
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import MSO_VERTICAL_ANCHOR
+
+# CONFIGURATION 
+csv_files = ["Source_CSv.csv", "deltaCSV.csv"]
+output_ppt = "Out.pptx"
+
+# Colors and dimensions
+box_fill = RGBColor(219, 230, 243)
+text_dark = RGBColor(0, 32, 96)
+left_margin = Inches(0.5)  
+box_width = Inches(9.3)
+box_height_base = Inches(1.5)
+gap_between_boxes = Inches(0.3)
+header_font_name = 'Tahoma'
+header_font_size = Pt(20)
+data_font_name = 'Tahoma'
+data_font_size = Pt(8)
+slide_height = Inches(7.0) 
+
+def read_csv_data(file_path):
+    """Read pipe-delimited CSV and normalize headers."""
+    data = []
+    with open(file_path, newline='', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f, delimiter='|')
+        reader.fieldnames = [h.strip().lower() for h in reader.fieldnames]
+        for row in reader:
+            data.append({k.strip().lower(): v for k, v in row.items()})
+    return data
+
+
+def format_number(value):
+    """Add + or - sign before numeric values."""
+    try:
+        num = float(value.replace(',', ''))
+        return f"+{int(num)}" if num > 0 else f"{int(num)}"
+    except:
+        return value
+
+
+def add_csv_box(slide, data, y_position):
+    """Add a single data box for one CSV at the given y_position."""
+    total_rows = len(data)
+    box_height = box_height_base + Pt(14) * total_rows
+
+    # Create box
+    rect = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left_margin, y_position, box_width, box_height)
+    rect.fill.solid()
+    rect.fill.fore_color.rgb = box_fill
+    rect.line.color.rgb = box_fill
+
+    tf = rect.text_frame
+    tf.clear()  
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_VERTICAL_ANCHOR.TOP
+    tf.margin_top = 0  
+    tf.margin_left = Inches(0.25)
+    tf.margin_right = Inches(0.25)
+    tf.margin_bottom = Inches(0.1)
+
+    # Group by line_item
+    grouped = {}
+    for row in data:
+        item = row['line_item'].strip()
+        grouped.setdefault(item, []).append(row)
+
+    first_paragraph = True
+    for item, rows in grouped.items():
+        diff_value = format_number(rows[0].get('difference', '').strip())
+        p_item = tf.add_paragraph()
+        p_item.text = f"{item} ({diff_value})"
+        p_item.font.bold = True
+        p_item.font.size = data_font_size
+        p_item.font.name = data_font_name
+        p_item.font.color.rgb = text_dark
+        p_item.space_after = Pt(2)
+        if first_paragraph:
+            p_item.space_before = 0
+            first_paragraph = False
+
+        for r in rows:
+            entity_diff = format_number(r.get('entity_difference', '').strip())
+            entity_name = r.get('entity','').strip()
+            comment = r.get('comment','').replace('\n',' ').strip()
+
+            p_bullet = tf.add_paragraph()
+            p_bullet.level = 1
+            p_bullet.space_before = 0
+            p_bullet.space_after = 0
+
+            # Bold entity diff + name
+            run_bold = p_bullet.add_run()
+            run_bold.text = f"{entity_diff} - {entity_name} "
+            run_bold.font.bold = True
+            run_bold.font.size = data_font_size
+            run_bold.font.name = data_font_name
+            run_bold.font.color.rgb = text_dark
+
+            # Normal comment
+            run_normal = p_bullet.add_run()
+            run_normal.text = comment
+            run_normal.font.bold = False
+            run_normal.font.size = data_font_size
+            run_normal.font.name = data_font_name
+            run_normal.font.color.rgb = text_dark
+
+    return y_position + box_height + gap_between_boxes
+
+# MAIN EXECUTION 
+prs = Presentation()
+current_slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+# Title
+title_shape = current_slide.shapes.add_textbox(left_margin, Inches(0.2), Inches(9.0), Inches(1.0))
+title_tf = title_shape.text_frame
+p = title_tf.paragraphs[0]
+p.text = "ADQ Consolidated Financial Statements -"
+p.font.bold = True
+p.font.size = header_font_size
+p.font.name = header_font_name
+p.font.color.rgb = text_dark
+
+p2 = title_tf.add_paragraph()
+p2.text = "Income Statement & Balance Sheet Snapshots"
+p2.font.bold = True
+p2.font.size = header_font_size
+p2.font.name = header_font_name
+p2.font.color.rgb = text_dark
+
+# Start boxes immediately below title 
+y_position = Inches(0.2) + Inches(1.0)  
+
+# Add CSV boxes
+for csv_file in csv_files:
+    data = read_csv_data(csv_file)
+    total_rows = len(data)
+    estimated_box_height = box_height_base + Pt(14) * total_rows
+
+    if y_position + estimated_box_height > slide_height:
+        current_slide = prs.slides.add_slide(prs.slide_layouts[6])
+        # Title on new slide
+        title_shape = current_slide.shapes.add_textbox(left_margin, Inches(0.2), Inches(9.0), Inches(1.0))
+        title_tf = title_shape.text_frame
+        p = title_tf.paragraphs[0]
+        p.text = "ADQ Consolidated Financial Statements -"
+        p.font.bold = True
+        p.font.size = header_font_size
+        p.font.name = header_font_name
+        p.font.color.rgb = text_dark
+
+        p2 = title_tf.add_paragraph()
+        p2.text = "Income Statement & Balance Sheet Snapshots"
+        p2.font.bold = True
+        p2.font.size = header_font_size
+        p2.font.name = header_font_name
+        p2.font.color.rgb = text_dark
+
+        y_position = Inches(0.2) + Inches(1.0)  
+
+    y_position = add_csv_box(current_slide, data, y_position)
+
+prs.save(output_ppt)
+print(f"PPT created : {output_ppt}")
