@@ -1,0 +1,614 @@
+# Initial Table creation
+#all sheet final with dynamic id creation
+
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col, isnan
+from pyspark.sql import Window
+from functools import reduce
+from pyspark.sql import DataFrame
+
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("Rule4Validation") \
+    .getOrCreate()
+
+spark.catalog.clearCache()
+
+# Define base path and transaction ID
+base_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables"
+mapping_table_path = f"{base_path}/core_rule4_mapping"
+final_output_path = f"{base_path}/referencerule4"
+txn_id = "MS1_1000001"
+
+# Load mapping table
+mapping_df = spark.read.format("delta").load(mapping_table_path)
+
+# Define sheet-to-table path mapping
+sheet_paths = {
+    "GN-17.3": f"{base_path}/ods_gn_17_3",
+    "SOCIE": f"{base_path}/ods_socie",
+    "SoFP - Commentary": f"{base_path}/ods_sofp_commentary",
+    "SoPL - Commentary": f"{base_path}/ods_sopl_commentary"
+}
+
+# Cache filtered data per sheet
+filtered_sheets = {}
+
+# Initialize final output list
+final_rows = []
+
+# Process each mapping row
+for row in mapping_df.collect():
+    sheetname = row["sheetname"]
+    account = row["account"]
+    diff_col = row["differenceheader"]
+    pc_col = row["changeheader"]
+    comm_col = row["commentaryheader"]
+    mappingtableid = row["id"]
+
+    sheet_path = sheet_paths.get(sheetname)
+    if not sheet_path:
+        print(f"Skipping unknown sheet: {sheetname}")
+        continue
+
+    if sheetname not in filtered_sheets:
+        try:
+            df = spark.read.format("delta").load(sheet_path)
+        except Exception as e:
+            print(f"Failed to load sheet: {sheetname} — {e}")
+            filtered_sheets[sheetname] = None
+            continue
+
+        if "txnID" not in df.columns:
+            print(f"Skipping sheet: {sheetname} — 'txnID' column not found.")
+            filtered_sheets[sheetname] = None
+            continue
+
+        df = df.filter(col("txnID") == txn_id)
+
+        if df.limit(1).count() == 0:
+            print(f"No data found for txnID {txn_id} in sheet: {sheetname}")
+            filtered_sheets[sheetname] = None
+            continue
+
+        print(f"Loaded {df.count()} rows for txnID {txn_id} in sheet: {sheetname}")
+        filtered_sheets[sheetname] = df.cache()
+
+    df = filtered_sheets.get(sheetname)
+    if df is None:
+        continue
+
+    missing_cols = [c for c in [diff_col, pc_col, comm_col] if c not in df.columns]
+    if missing_cols:
+        print(f"Skipping sheet: {sheetname} due to missing columns: {missing_cols}")
+        continue
+
+    df_casted = df.withColumn(diff_col, F.col(diff_col).cast("double")) \
+                  .withColumn(pc_col, F.col(pc_col).cast("double"))
+
+    fail_1 = F.abs(F.col(diff_col)) > 10_000_000
+    fail_2 = (F.abs(F.col(pc_col)) > 10) & (F.abs(F.col(diff_col)) >= 5_000_000)
+
+    df_casted = df_casted.withColumn("PassFailFlag",
+        F.when(F.col(diff_col).isNull() | isnan(F.col(diff_col)), "Not Applicable")
+         .when(fail_1 | fail_2, "Fail")
+         .otherwise("Pass")
+    )
+
+    formatted_df = df_casted.select(
+        F.lit(mappingtableid).alias("mappingtableid"),
+        F.col("id").alias("odsid"),
+        F.lit(sheetname).alias("sheetname"),
+        F.col("fsli"),
+        F.lit(account).alias("account"),
+        F.col(diff_col).alias("difference"),
+        F.col(pc_col).alias("Change"),
+        F.col(comm_col).alias("Commentary"),
+        F.col("PassFailFlag")
+    )
+
+    final_rows.append(formatted_df)
+
+# Combine all final_rows into one DataFrame
+if final_rows:
+    final_df = reduce(DataFrame.unionByName, final_rows)
+
+    # Generate sequential AI1_ IDs 
+    window = Window.orderBy(F.monotonically_increasing_id())
+    final_with_rownum = final_df.withColumn("row_num", F.row_number().over(window))
+
+    final_with_id = final_with_rownum.withColumn(
+        "id",
+        F.concat(F.lit("AI1_"), F.format_string("%06d", F.col("row_num")))
+    ).withColumn("txnID", F.lit(txn_id)).drop("row_num")
+
+    # Make 'id' the first column
+    cols = ["id"] + [c for c in final_with_id.columns if c != "id"]
+    final_df_with_id = final_with_id.select(*cols)
+
+    # Write final output
+    final_df_with_id.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(final_output_path)
+    print("Final output written successfully with AI1_ IDs as the first column.")
+else:
+    print("No valid data found to write.")
+
+
+
+
+
+
+
+
+
+# Input csv preparation
+
+
+#csv file creation 
+
+
+
+from pyspark.sql.functions import col
+
+#  Read the table from OneLake using ABFS path
+table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/referencerule4"
+)
+
+df = spark.read.load(table_path)
+
+#  Define FSLI exclusion list
+exclusion_list = ["christo"]
+
+#  Get distinct sheetnames
+sheetnames = [row["sheetname"] for row in df.select("sheetname").distinct().collect()]
+
+# Loop through each sheetname and export failed rows
+for sheet in sheetnames:
+    filtered_df = df.filter(
+        (col("sheetname") == sheet) &
+        (~col("fsli").isin(exclusion_list)) &
+        (col("fsli").isNotNull()) &
+        (col("PassFailFlag") == "Fail")
+    )
+
+    selected_df = filtered_df.select("id","fsli", "account", "difference", "Change", "Commentary")
+
+    output_path = (
+        f"abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+        f"2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/referencerule4_csv_output/{sheet}"
+    )
+
+    selected_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(output_path)
+
+    print(f" Exported failed rows for sheet: {sheet} to {output_path}")
+
+
+# Python Notebook - To be invoked and added separately
+
+!pip install openai
+
+#final Ai 
+
+
+#  Imports 
+import os, json, fsspec, pandas as pd
+from math import ceil
+from openai import AzureOpenAI
+from pyspark.sql import SparkSession
+
+
+#  Azure OpenAI Configuration 
+endpoint = "https://adq-aifoundrytest.cognitiveservices.azure.com/"
+model_name = "gpt-4.1"
+deployment = "gpt-4.1"
+
+subscription_key = ""
+api_version = ""
+
+client = AzureOpenAI(
+    api_version=api_version,
+    azure_endpoint=endpoint,
+    api_key=subscription_key,
+)
+#  ABFS input and output paths 
+input_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/referencerule4_csv_output"
+)
+
+output_base_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/referencerule4_json_output"
+)
+
+
+#  Read all CSVs recursively from OneLake 
+fs = fsspec.filesystem(
+    "abfss",
+    account_name="onelake",  
+    account_host="onelake.dfs.fabric.microsoft.com",  
+)
+
+csv_files = fs.glob(f"{input_path}/**/*.csv")
+
+if not csv_files:
+    raise FileNotFoundError("No CSV files found in the input folder!")
+
+dfs = []
+for file_path in csv_files:
+    with fs.open(file_path) as f:
+        df = pd.read_csv(f)
+        sheetname = os.path.basename(os.path.dirname(file_path))
+        df["sheetname"] = sheetname
+        dfs.append(df)
+
+df_all = pd.concat(dfs, ignore_index=True)
+sheet_names = df_all["sheetname"].unique().tolist()
+
+# Your AI system prompt 
+prompt = """
+
+You are an AI assistant reviewing Quarterly Financial Statement (FS) packs submitted by subsidiaries to the group company.
+
+Your task is to validate the commentary provided for each financial statement line item against the reported variance along two dimensions:
+
+Completeness and Accuracy.
+
+Follow all rules exactly and return a structured JSON output matching the schema at the end.
+
+INPUT FORMAT
+
+Each record is provided one per line, pipe-delimited (leading/trailing pipes optional):
+
+|<id>|<line item>|<difference>|<percentage change>|<variance_for_grouping>|<comment>|  
+
+If variance_for_grouping is blank or missing, treat it as equal to difference.
+
+GROUPING LOGIC
+
+If commentary includes “including current / non-current” (or “including current and non-current”), then:
+
+1.	Treat that commentary as group-level, applying to all related lines (e.g., “Loans and borrowings.”, “Loans and borrowings – current.”).
+
+2.	Use the combined movement of those lines for completeness evaluation.
+
+3.	Still return a separate JSON object for each line.
+
+4.	Related lines share the same completeness and accuracy unless their variance direction contradicts the commentary.
+
+COMPLETENESS — coverage of variance
+
+A commentary passes Completeness if it explains ≥ 80 % of the absolute variance amount.
+
+Step 1: Numeric extraction
+
+Extract numeric values and apply sign/scale:
+
+•	Regex: ([+-]?[0-9]*\.?[0-9]+)\s*(bn|billion|m|mn|million|k|thousand)?
+
+•	Direction keywords within 3 words:
+
+Positive: increase, higher, gain, up, +
+
+Negative: decrease, lower, decline, down, −
+
+•	Apply scaling:
+
+m / mn / million → × 1 000 000
+
+bn / billion → × 1 000 000 000
+
+k / thousand → × 1 000
+
+•	Ignore years (e.g., 2025) or small identifiers (≤ 100 w/o units).
+
+Step 2: Coverage calculation
+
+Sum all valid numbers (with sign + scale).
+
+coverage = explained variance ÷ absolute variance × 100 %
+
+Step 3: Qualitative completeness
+
+If no numeric data:
+
+•	Accept qualitative explanations only if they clearly state they explain the entire movement (e.g., “entire change due to FX revaluation”).
+
+•	Otherwise → Fail.
+
+Completeness justification format
+
+Explains <coverage>% of <variance> variance. (<numeric breakdown>)
+
+Explains <coverage>% of <variance> variance. (<numeric breakdown>)
+
+Examples:
+
+•	Explains 100 % of 2.01 bn variance. (5.2 bn + 0.5 bn + 0.2 bn – 3.9 bn = 2.0 bn)
+
+•	Explains 52.5 % of 162.9 m variance. (29.5 m + 26 m = 55.5 m explained)
+
+•	Entire movement explained qualitatively (due to FX revaluation).
+
+ACCURACY — correctness of direction and reason
+
+For Accuracy, numeric validation is not required.
+
+Evaluate only direction and reason.
+
+Pass if:
+
+1.	Commentary direction (increase/decrease) matches variance sign.
+
+2.	Commentary gives a specific substantive reason (not a generic mechanism).
+
+Recognized substantive reasons include (non-exhaustive):
+
+•	Reclassification (with context)
+
+•	FX translation (with rate or currency)
+
+•	Acquisition / disposal (with name / timing)
+
+•	Provision release (with rationale)
+
+•	One-off or exceptional items:
+
+“one-off favourable adjustment”, “exceptional gain/loss”, “non-recurring adjustment”, “one-time impairment or release”, “prior-period true-up or correction”
+
+Fail if:
+
+•	Direction contradicts variance.
+
+•	Commentary is vague (“FX differences”, “reclassified”) without context.
+
+•	Mixed increase / decrease with no dominant direction.
+
+Accuracy justification format
+
+Commentary direction matches variance and provides substantive reason (e.g., FX impact, impairment, one-off adjustment).
+
+Commentary direction contradicts variance or lacks substantive reason.
+
+IMPLEMENTATION NOTES
+
+•	Trim whitespace in parsed fields.
+
+•	Convert extracted numbers to float after scaling.
+
+•	Use sign of difference to determine direction.
+
+•	Round monetary values to two decimals in the JSON.
+
+OUTPUT SCHEMA
+
+Return a JSON array of objects:
+
+{
+  "id": "string", 
+  "line_item": "string",
+  "completeness": "Pass" | "Fail",
+  "completeness_justification": "string",
+  "accuracy": "Pass" | "Fail",
+  "accuracy_justification": "string"
+}
+
+No additional text outside the JSON array.
+
+EXAMPLE INPUT
+
+|AI1_000001|Loans and borrowings.|265313810|0|265847823|"Loans and borrowing (Including current/ non current) decreased by 2.5 BN due to: 2.8 BN Bond repayment & 1.4 BN standard debt repayments. 1.5 BN loan drawdowns due to construction of ABC and DEF including 0.9 BN HQ XYZ. 0.2 BN FX & other movements."|
+
+|AI1_000030|Loans and borrowings - current.|2732813238|-30|-2732813238|"Loans and borrowing (Including current/ non current) decreased by 2.5 BN due to: 2.8 BN Bond repayment & 1.4 BN standard debt repayments. 1.5 BN loan drawdowns due to construction of M2RO and S4RO including 0.9 BN HQ RCF. 0.2 BN FX & other movements."|
+
+EXAMPLE OUTPUT
+
+[
+
+  {
+    "id": "AI1_000001",  
+    "line_item": "Loans and borrowings.",
+    "completeness": "Pass",
+    "completeness_justification": "Explains 100% of 2.47bn combined variance. (-2.8bn –1.4bn +1.5bn +0.9bn +0.2bn = -1.6bn → rounded to total group movement of -2.47bn, acceptable within threshold).",
+    "accuracy": "Pass",
+    "accuracy_justification": "Commentary direction (decrease) matches variance and provides substantive reasons (bond repayment, debt repayment, loan drawdowns, FX movements)."
+  },
+
+  {
+    "id": "AI1_000030",  
+    "line_item": "Loans and borrowings - current.",
+    "completeness": "Pass",
+    "completeness_justification": "Explains 100% of 2.47bn combined variance. (-2.8bn –1.4bn +1.5bn +0.9bn +0.2bn = -1.6bn → rounded to total group movement of -2.47bn, acceptable within threshold).",
+    "accuracy": "Pass",
+    "accuracy_justification": "Commentary direction (decrease) matches variance and provides substantive reasons (bond repayment, debt repayment, drawdowns, FX adjustments)."
+  }
+
+]
+
+"""
+
+#  Process each sheet 
+for sheet in sheet_names:
+    df_sheet = df_all[df_all["sheetname"] == sheet].copy()
+
+    # Rename expected columns
+    df_sheet = df_sheet.rename(columns={
+        "id": "ID",  
+        "fsli": "Line Item",
+        "difference": "Difference",
+        "Change": "% Change",
+        "Commentary": "Commentary"
+    }).fillna("")
+
+    # Include ID in the columns
+    df_pd = df_sheet[["ID", "Line Item", "Difference", "% Change", "Commentary"]]
+
+    batch_size = 100
+    num_batches = ceil(len(df_pd) / batch_size)
+    all_results = []
+
+    print(f"Processing sheet '{sheet}' ({len(df_pd)} rows)")
+
+    for i in range(num_batches):
+        batch_df = df_pd.iloc[i * batch_size:(i + 1) * batch_size]
+
+        # Create markdown table including ID
+        lines = ["|id|line item|difference|percentage change|variance_for_grouping|comment|"]
+        for _, row in batch_df.iterrows():
+            lines.append(f"|{row['ID']}|{row['Line Item']}|{row['Difference']}|{row['% Change']}||{row['Commentary']}|")
+
+        input_table = "\n".join(lines)
+
+        # Call the AI model
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": input_table}
+            ],
+            temperature=0
+        )
+
+        output_text = response.choices[0].message.content
+        try:
+            batch_result = json.loads(output_text)
+            all_results.append(batch_result)
+        except json.JSONDecodeError:
+            print(f"Batch {i+1} failed to parse JSON. Raw output:\n{output_text}")
+
+    #  Flatten results 
+    flat_results = []
+    for batch in all_results:
+        if isinstance(batch, list):
+            flat_results.extend(batch)
+        else:
+            flat_results.append(batch)
+
+    #  Save to OneLake as .json 
+    if flat_results:
+        output_json_path = f"{output_base_path}/{sheet}_AI_JSON.json"
+        with fsspec.open(output_json_path, "w") as f:
+            json.dump(flat_results, f, indent=2)
+        print(f"Saved {len(flat_results)} records to {output_json_path}")
+    else:
+        print(f"No valid JSON to save for sheet {sheet}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Final table writing from Ai
+
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, trim, lower
+
+# Initialize Spark session
+spark = SparkSession.builder.getOrCreate()
+
+# Paths
+json_folder = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/referencerule4_json_output"
+)
+existing_table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/referencerule4"
+)
+new_table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/ALL4AIRULE4"
+)
+
+# Step 1: Read AI JSON output 
+json_df = spark.read.option("multiline", True).json(json_folder)
+
+# Flatten JSON and rename AI columns
+flattened_df = json_df.select(
+    col("id").alias("id"),
+    col("line_item").alias("fsli"),  
+    col("completeness").alias("Completeness_Status_ai"),
+    col("completeness_justification").alias("Completeness_Justification_ai"),
+    col("accuracy").alias("Accuracy_Status_ai"),
+    col("accuracy_justification").alias("Accuracy_Justification_ai")
+)
+
+# Clean JSON keys
+flattened_df = flattened_df.withColumn("id", lower(trim(col("id")))) \
+                           .withColumn("fsli", lower(trim(col("fsli"))))
+
+# Read existing Delta table 
+existing_df = spark.read.format("delta").load(existing_table_path)
+
+# Cast and clean keys
+existing_df = existing_df.withColumn("id", lower(trim(col("id")))) \
+                         .withColumn("fsli", lower(trim(col("fsli"))))
+
+existing_df = existing_df.filter(
+    (col("fsli").isNotNull()) & (col("fsli") != "") & (col("fsli") != "nan")
+)
+
+
+
+# Drop old AI columns
+columns_to_replace = ["Completeness_Status", "Completeness_Justification",
+                      "Accuracy_Status", "Accuracy_Justification"]
+existing_df_dropped = existing_df.drop(*columns_to_replace)
+
+# Step 4: Left join using composite key (id + fsli)
+merged_df = existing_df_dropped.join(
+    flattened_df,
+    on=["id","fsli"],  
+    how="left"
+)
+
+# Optional sort
+merged_df_sorted = merged_df.orderBy("id", "fsli")
+
+# Write merged result to new Delta table 
+merged_df_sorted.write.format("delta").mode("overwrite").save(new_table_path)
+
+print(f"Merged JSON output into new Delta table at {new_table_path}")
+
+
+
+
+
+
+
+
+
+
+
