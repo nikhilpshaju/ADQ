@@ -1,3 +1,9 @@
+joined_df = joined_df.withColumn(
+    "fsli",
+    F.regexp_replace(F.regexp_replace(F.regexp_replace("fsli", r"[^\x00-\x7F]", ""), r"\\s+", " "), r"^\\s+|\\s+$", "")
+)
+
+
 from openpyxl import load_workbook
 from openpyxl.workbook.calc_props import CalcProperties
 
