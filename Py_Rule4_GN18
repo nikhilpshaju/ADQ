@@ -1,0 +1,499 @@
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.functions import col, lit, row_number
+from pyspark.sql import Window
+
+# Create Spark session with Delta support
+spark = SparkSession.builder \
+    .appName("gn_18_1_1 Commentary Validation") \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+    .getOrCreate()
+
+spark.catalog.clearCache()
+
+# Define input and output paths
+base_path = "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables"
+input_table_path = f"{base_path}/ods_gn_18_1_1"
+output_table_path = f"{base_path}/rule4_gn_18_1_1_commentary"
+txn_id = "MS1_1000001"
+
+# Load and filter input table
+try:
+    df = spark.read.format("delta").load(input_table_path)
+except Exception as e:
+    print(f"Failed to load gn_18_1_1 sheet — {e}")
+    df = None
+
+if df is not None and "txnID" in df.columns:
+    df = df.filter(F.col("txnID") == txn_id)
+
+    if df.limit(1).count() == 0:
+        print(f"No data found for txnID {txn_id} in gn_18_1_1 sheet.")
+    else:
+        print(f"Loaded {df.count()} rows for txnID {txn_id} in gn_18_1_1 sheet.")
+
+        # Extract relevant rows
+        diff_row = df.filter(F.lower(F.col("fsli")) == "difference").drop("fsli", "row_no").collect()[0].asDict()
+        pc_row = df.filter(F.lower(F.col("fsli")) == "% change").drop("fsli", "row_no").collect()[0].asDict()
+        commentary_row = df.filter(F.lower(F.col("fsli")) == "commentary").drop("fsli", "row_no").collect()[0].asDict()
+
+        # Exclude rows where fsli is 'txnID' or 'id'
+        df = df.filter(~F.col("fsli").isin(["txnID", "id"]))
+
+        # Get list of asset columns
+        asset_columns = [col for col in df.columns if col not in ["fsli", "row_no", "txnID", "id"]]
+
+        # Safe float conversion
+        def safe_float(val):
+            try:
+                return float(val)
+            except:
+                return 0.0
+
+        # Build validation result
+        result_rows = []
+        for col_name in asset_columns:
+            diff_val = safe_float(diff_row.get(col_name, 0.0))
+            pc_val = safe_float(pc_row.get(col_name, 0.0))
+            comm_val = str(commentary_row.get(col_name, "")) if commentary_row.get(col_name) else ""
+
+            if abs(diff_val) > 10_000_000:
+                flag = "Fail"
+                remark = f"Amount exceeds threshold. difference={round(abs(diff_val) / 1_000_000, 2)}M"
+            elif abs(pc_val) > 10 and abs(diff_val) >= 5_000_000:
+                flag = "Fail"
+                remark = f"% Change and Amount exceed thresholds. pc_change={round(abs(pc_val), 2)}, difference={round(abs(diff_val) / 1_000_000, 2)}M"
+            else:
+                flag = "Pass"
+                remark = None
+
+            result_rows.append((col_name, diff_val, pc_val, comm_val, flag, remark))
+        # Create result DataFrame and rename columns
+        result_df = spark.createDataFrame(result_rows, ["fsli", "difference", "pc_change", "commentary", "passfailflag", "remark"]) \
+            .withColumnRenamed("fsli", "account") \
+            .withColumnRenamed("pc_change", "change")
+
+
+
+        # Reorder columns explicitly
+        result_df = result_df.select("account", "difference", "change", "commentary", "passfailflag", "remark")
+        # Add metadata columns
+        result_df = result_df.withColumn("sheetname", lit("gn_18_1_1")) \
+                             .withColumn("txnID", lit(txn_id))
+
+        # Generate dynamic gn_18_1_1_ IDs
+        window = Window.orderBy(F.monotonically_increasing_id())
+        result_df = result_df.withColumn("row_num", row_number().over(window)) \
+                             .withColumn("id", F.concat(F.lit("gn_18_1_1_"), F.format_string("%06d", F.col("row_num")))) \
+                             .drop("row_num")
+
+        # Reorder columns
+        cols = ["id"] + [c for c in result_df.columns if c != "id"]
+        final_df = result_df.select(*cols)
+
+        # Save result to Lakehouse as Delta
+        final_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(output_table_path)
+        print("Final output written successfully for gn_18_1_1 with gn_18_1_1_ IDs.")
+else:
+    print("gn_18_1_1 sheet not loaded or missing 'txnID' column.")
+
+
+###CSV creation for AI
+
+
+from pyspark.sql.functions import col
+# Define table path
+table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/rule4_gn_18_1_1_commentary"
+)
+
+# Read the table
+df = spark.read.load(table_path)
+
+# Filter failed rows for gn_18_1_1
+filtered_df = df.filter(
+    (col("sheetname") == "gn_18_1_1") &
+    (col("PassFailFlag") == "Fail")
+)
+
+# Select relevant columns
+selected_df = filtered_df.select("id","account", "difference", "Change", "Commentary")
+
+# Define output path
+output_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/referencerule4_csv_gn_18_1_1"
+)
+
+# Write to CSV
+selected_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(output_path)
+
+print(f"Exported failed rows for sheet: gn_18_1_1 to {output_path}")
+
+######################AI invocation
+
+#final Ai 
+
+
+#  Imports 
+import os, json, fsspec, pandas as pd
+from math import ceil
+from openai import AzureOpenAI
+from pyspark.sql import SparkSession
+
+
+#  Azure OpenAI Configuration 
+endpoint = ""
+model_name = "gpt-4.1"
+deployment = "gpt-4.1"
+
+subscription_key = ""
+api_version = ""
+
+client = AzureOpenAI(
+    api_version=api_version,
+    azure_endpoint=endpoint,
+    api_key=subscription_key,
+)
+#  ABFS input and output paths 
+input_path = ("abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/referencerule4_csv_gn_18_1_1/part-00000-c1226b5d-b637-46f0-ad93-e22b1cfb2b43-c000.csv"
+    
+)
+
+output_base_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/referencerule4_json_gn_18_1"
+)
+
+
+
+# Your AI system prompt 
+prompt = """
+
+You are an AI assistant reviewing Quarterly Financial Statement (FS) packs submitted by subsidiaries to the group company.
+
+Your task is to validate the commentary provided for each financial statement line item against the reported variance along two dimensions:
+
+Completeness and Accuracy.
+
+Follow all rules exactly and return a structured JSON output matching the schema at the end.
+
+INPUT FORMAT
+
+Each record is provided one per line, pipe-delimited (leading/trailing pipes optional):
+
+|<id>|<line item>|<difference>|<percentage change>|<variance_for_grouping>|<comment>|  
+
+If variance_for_grouping is blank or missing, treat it as equal to difference.
+
+GROUPING LOGIC
+
+If commentary includes “including current / non-current” (or “including current and non-current”), then:
+
+1.	Treat that commentary as group-level, applying to all related lines (e.g., “Loans and borrowings.”, “Loans and borrowings – current.”).
+
+2.	Use the combined movement of those lines for completeness evaluation.
+
+3.	Still return a separate JSON object for each line.
+
+4.	Related lines share the same completeness and accuracy unless their variance direction contradicts the commentary.
+
+COMPLETENESS — coverage of variance
+
+A commentary passes Completeness if it explains ≥ 80 % of the absolute variance amount.
+
+Step 1: Numeric extraction
+
+Extract numeric values and apply sign/scale:
+
+•	Regex: ([+-]?[0-9]*\.?[0-9]+)\s*(bn|billion|m|mn|million|k|thousand)?
+
+•	Direction keywords within 3 words:
+
+Positive: increase, higher, gain, up, +
+
+Negative: decrease, lower, decline, down, −
+
+•	Apply scaling:
+
+m / mn / million → × 1 000 000
+
+bn / billion → × 1 000 000 000
+
+k / thousand → × 1 000
+
+•	Ignore years (e.g., 2025) or small identifiers (≤ 100 w/o units).
+
+Step 2: Coverage calculation
+
+Sum all valid numbers (with sign + scale).
+
+coverage = explained variance ÷ absolute variance × 100 %
+
+Step 3: Qualitative completeness
+
+If no numeric data:
+
+•	Accept qualitative explanations only if they clearly state they explain the entire movement (e.g., “entire change due to FX revaluation”).
+
+•	Otherwise → Fail.
+
+Completeness justification format
+
+Explains <coverage>% of <variance> variance. (<numeric breakdown>)
+
+Explains <coverage>% of <variance> variance. (<numeric breakdown>)
+
+Examples:
+
+•	Explains 100 % of 2.01 bn variance. (5.2 bn + 0.5 bn + 0.2 bn – 3.9 bn = 2.0 bn)
+
+•	Explains 52.5 % of 162.9 m variance. (29.5 m + 26 m = 55.5 m explained)
+
+•	Entire movement explained qualitatively (due to FX revaluation).
+
+ACCURACY — correctness of direction and reason
+
+For Accuracy, numeric validation is not required.
+
+Evaluate only direction and reason.
+
+Pass if:
+
+1.	Commentary direction (increase/decrease) matches variance sign.
+
+2.	Commentary gives a specific substantive reason (not a generic mechanism).
+
+Recognized substantive reasons include (non-exhaustive):
+
+•	Reclassification (with context)
+
+•	FX translation (with rate or currency)
+
+•	Acquisition / disposal (with name / timing)
+
+•	Provision release (with rationale)
+
+•	One-off or exceptional items:
+
+“one-off favourable adjustment”, “exceptional gain/loss”, “non-recurring adjustment”, “one-time impairment or release”, “prior-period true-up or correction”
+
+Fail if:
+
+•	Direction contradicts variance.
+
+•	Commentary is vague (“FX differences”, “reclassified”) without context.
+
+•	Mixed increase / decrease with no dominant direction.
+
+Accuracy justification format
+
+Commentary direction matches variance and provides substantive reason (e.g., FX impact, impairment, one-off adjustment).
+
+Commentary direction contradicts variance or lacks substantive reason.
+
+IMPLEMENTATION NOTES
+
+•	Trim whitespace in parsed fields.
+
+•	Convert extracted numbers to float after scaling.
+
+•	Use sign of difference to determine direction.
+
+•	Round monetary values to two decimals in the JSON.
+
+OUTPUT SCHEMA
+
+Return a JSON array of objects:
+
+{
+  "id": "string", 
+  "line_item": "string",
+  "completeness": "Pass" | "Fail",
+  "completeness_justification": "string",
+  "accuracy": "Pass" | "Fail",
+  "accuracy_justification": "string"
+}
+
+No additional text outside the JSON array.
+
+EXAMPLE INPUT
+
+|AI1_000001|Loans and borrowings.|265313810|0|265847823|"Loans and borrowing (Including current/ non current) decreased by 2.5 BN due to: 2.8 BN Bond repayment & 1.4 BN standard debt repayments. 1.5 BN loan drawdowns due to construction of ABC and DEF including 0.9 BN HQ XYZ. 0.2 BN FX & other movements."|
+
+|AI1_000030|Loans and borrowings - current.|2732813238|-30|-2732813238|"Loans and borrowing (Including current/ non current) decreased by 2.5 BN due to: 2.8 BN Bond repayment & 1.4 BN standard debt repayments. 1.5 BN loan drawdowns due to construction of M2RO and S4RO including 0.9 BN HQ RCF. 0.2 BN FX & other movements."|
+
+EXAMPLE OUTPUT
+
+[
+
+  {
+    "id": "AI1_000001",  
+    "line_item": "Loans and borrowings.",
+    "completeness": "Pass",
+    "completeness_justification": "Explains 100% of 2.47bn combined variance. (-2.8bn –1.4bn +1.5bn +0.9bn +0.2bn = -1.6bn → rounded to total group movement of -2.47bn, acceptable within threshold).",
+    "accuracy": "Pass",
+    "accuracy_justification": "Commentary direction (decrease) matches variance and provides substantive reasons (bond repayment, debt repayment, loan drawdowns, FX movements)."
+  },
+
+  {
+    "id": "AI1_000030",  
+    "line_item": "Loans and borrowings - current.",
+    "completeness": "Pass",
+    "completeness_justification": "Explains 100% of 2.47bn combined variance. (-2.8bn –1.4bn +1.5bn +0.9bn +0.2bn = -1.6bn → rounded to total group movement of -2.47bn, acceptable within threshold).",
+    "accuracy": "Pass",
+    "accuracy_justification": "Commentary direction (decrease) matches variance and provides substantive reasons (bond repayment, debt repayment, drawdowns, FX adjustments)."
+  }
+
+]
+
+"""
+
+# Read the CSV
+df_sheet = pd.read_csv(input_path)
+
+
+# Rename expected columns
+df_sheet = df_sheet.rename(columns={
+    "id": "ID",  
+    "account": "Line Item",
+    "difference": "Difference",
+    "Change": "% Change",
+    "Commentary": "Commentary"
+}).fillna("")
+
+# Include ID in the columns
+df_pd = df_sheet[["ID", "Line Item", "Difference", "% Change", "Commentary"]]
+
+batch_size = 100
+num_batches = ceil(len(df_pd) / batch_size)
+all_results = []
+
+print(f"Processing {len(df_pd)} rows")
+
+
+for i in range(num_batches):
+    batch_df = df_pd.iloc[i * batch_size:(i + 1) * batch_size]
+
+    # Create markdown table with lowercase headers as expected by the prompt
+    lines = ["|id|line item|difference|percentage change|variance_for_grouping|comment|"]
+    for _, row in batch_df.iterrows():
+        lines.append(
+            f"|{row['ID']}|{row['Line Item']}|{row['Difference']}|{row['% Change']}||{row['Commentary']}|"
+        )
+
+    input_table = "\n".join(lines)
+
+
+    # Call the AI model
+    response = client.chat.completions.create(
+        model=deployment_name,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": input_table}
+        ],
+        temperature=0
+    )
+
+    output_text = response.choices[0].message.content
+    try:
+        batch_result = json.loads(output_text)
+        all_results.append(batch_result)
+    except json.JSONDecodeError:
+        print(f"Batch {i+1} failed to parse JSON. Raw output:\n{output_text}")
+
+# Flatten results
+flat_results = []
+for batch in all_results:
+    if isinstance(batch, list):
+        flat_results.extend(batch)
+    else:
+        flat_results.append(batch)
+
+# Save to OneLake as .json
+if flat_results:
+    output_json_path = f"{output_base_path}/AI_JSON.json"
+    with fsspec.open(output_json_path, "w") as f:
+        json.dump(flat_results, f, indent=2)
+    print(f"Saved {len(flat_results)} records to {output_json_path}")
+else:
+    print("No valid JSON to save.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Update in table
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, trim, lower
+
+# Initialize Spark session
+spark = SparkSession.builder.getOrCreate()
+
+# Paths
+json_path = ("abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Files/referencerule4_json_gn_18_1/AI_JSON.json"
+    
+)
+existing_table_path = (
+   "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/rule4_gn_18_1_1_commentary"
+)
+new_table_path = (
+    "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/"
+    "2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables/AI_gn_18_1"
+)
+
+# Step 1: Read AI JSON output
+json_df = spark.read.option("multiline", True).json(json_path)
+
+# Flatten JSON and rename AI columns
+flattened_df = json_df.select(
+    col("ID").alias("id"),
+    col("line_item").alias("account"),
+    col("Completeness").alias("Completeness_Status_ai"),
+    col("Completeness_Justification").alias("Completeness_Justification_ai"),
+    col("Accuracy").alias("Accuracy_Status_ai"),
+    col("Accuracy_Justification").alias("Accuracy_Justification_ai")
+)
+
+# Clean keys
+flattened_df = flattened_df.withColumn("id", lower(trim(col("id")))) \
+                           .withColumn("account", lower(trim(col("account"))))
+
+# Read existing Delta table
+existing_df = spark.read.format("delta").load(existing_table_path)
+
+# Clean keys in existing table
+existing_df = existing_df.withColumn("id", lower(trim(col("id")))) \
+                         .withColumn("account", lower(trim(col("account"))))
+
+# Drop old AI columns if they exist
+columns_to_replace = [
+    "Completeness_Status", "Completeness_Justification",
+    "Accuracy_Status", "Accuracy_Justification"
+]
+for col_name in columns_to_replace:
+    if col_name in existing_df.columns:
+        existing_df = existing_df.drop(col_name)
+
+# Join on id + account
+merged_df = existing_df.join(flattened_df, on=["id", "account"], how="left")
+
+# Optional sort
+merged_df_sorted = merged_df.orderBy("id", "account")
+
+# Write to new Delta table
+merged_df_sorted.write.format("delta").mode("overwrite").save(new_table_path)
+
+print(f"Merged AI output into new Delta table at {new_table_path}")
