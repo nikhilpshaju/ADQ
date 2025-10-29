@@ -1,3 +1,15 @@
+F.when(
+    (F.col("PassFailFlag") == "Fail") &
+    (F.col(comm_col).isNotNull()) &
+    (~isnan(F.col(comm_col))) &
+    (F.trim(F.col(comm_col)).isin("", "0", "0.0") == False),
+    "Pass"
+).otherwise("Fail").alias("Existence_Status")
+)
+
+
+
+
 �� ADDH Intercompany dividend payable
 
 joined_df = joined_df.withColumn(
