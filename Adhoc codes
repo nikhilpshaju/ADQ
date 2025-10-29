@@ -2,12 +2,11 @@ F.when(
     (F.col("PassFailFlag") == "Fail") &
     (F.col(comm_col).isNotNull()) &
     (~isnan(F.col(comm_col))) &
-    (F.trim(F.col(comm_col)).isin("", "0", "0.0") == False),
+    (~F.trim(F.col(comm_col)).isin("", "0", "0.0")),
     "Pass"
-).otherwise("Fail").alias("Existence_Status")
-)
+).otherwise("Fail").alias("Existence_Status"),
 
-
+F.lit("").alias("Existence_Justification")
 
 
 �� ADDH Intercompany dividend payable
