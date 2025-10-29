@@ -1,3 +1,159 @@
+# final all sheet + gn_18
+ 
+ 
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.functions import col, isnan
+from pyspark.sql import Window
+from functools import reduce
+from pyspark.sql import DataFrame
+ 
+ 
+# Config
+base_path =  "abfss://b20f828f-5169-4a6e-869e-ea6bb5e75572@onelake.dfs.fabric.microsoft.com/2d2bf4a9-53b4-40ed-a361-440c70e15ae7/Tables"
+ 
+txn_id = "MS1_1000001"
+final_output_path = f"{base_path}/referencerule4_combined"
+ 
+# Utility functions
+def safe_float(val):
+    try: return float(val)
+    except: return 0.0
+ 
+def validate_row(diff_val, pc_val, comm_val):
+    if diff_val > 10_000_000:
+        flag = "Fail"
+    elif pc_val > 10 and diff_val >= 5_000_000:
+        flag = "Fail"
+    else:
+        flag = "Pass"
+    existence_status = "Pass" if flag == "Fail" and comm_val.strip() not in ["", "0", "0.0"] else "Fail"
+    return flag, existence_status# GN1811 logic
+def process_gn1811():
+    try:
+        df = spark.read.format("delta").load(f"{base_path}/ods_gn_18_1_1").filter(col("txnID") == txn_id)
+        if df.count() == 0: return None
+    except: return None
+ 
+    rows = {}
+    for label in ["difference", "% change", "commentary"]:
+        row_df = df.filter(F.lower(F.col("fsli")) == label).drop("fsli", "row_no")
+        if row_df.count() > 0:
+            rows[label] = row_df.collect()[0].asDict()
+ 
+    id_val = df.filter(F.lower(F.col("fsli")) == "difference").select("id").first()["id"]
+    asset_cols = [c for c in df.columns if c not in ["fsli", "row_no", "txnID", "id"]]
+ 
+    result = []
+    for col_name in asset_cols:
+        diff_val = abs(safe_float(rows.get("difference", {}).get(col_name, 0.0)))
+        pc_val = abs(safe_float(rows.get("% change", {}).get(col_name, 0.0)))
+        comm_val = str(rows.get("commentary", {}).get(col_name, "")) if rows.get("commentary", {}).get(col_name) else ""
+        flag, existence_status = validate_row(diff_val, pc_val, comm_val)
+        result.append(("GN1811", "0", "", col_name, diff_val, pc_val, comm_val, flag, existence_status, "", txn_id, id_val, id_val))
+ 
+    return spark.createDataFrame(result, [
+        "sheetname", "mappingtableid", "fsli", "account", "difference", "pc_change", "commentary",
+        "PassFailFlag", "Existence_Status", "Existence_Justification", "txnID", "odsid", "id"
+    ])
+ 
+# Mapping sheet logic
+def process_mapping_sheets():
+    mapping_df = spark.read.format("delta").load(f"{base_path}/core_rule4_mapping")
+    sheet_paths = {
+        "GN-17.3": f"{base_path}/ods_gn_17_3",
+        "SOCIE": f"{base_path}/ods_socie",
+        "SoFP - Commentary": f"{base_path}/ods_sofp_commentary",
+        "SoPL - Commentary": f"{base_path}/ods_sopl_commentary"
+    }
+ 
+    cached_sheets = {}
+    final_dfs = []
+ 
+    for row in mapping_df.collect():
+        sheetname, account, diff_col, pc_col, comm_col, mappingtableid = row["sheetname"], row["account"], row["differenceheader"], row["changeheader"], row["commentaryheader"], row["id"]
+        path = sheet_paths.get(sheetname)
+        if not path: continue
+ 
+        if sheetname not in cached_sheets:
+            try:
+                df = spark.read.format("delta").load(path).filter(col("txnID") == txn_id)
+                cached_sheets[sheetname] = df.cache() if df.count() > 0 else None
+            except: cached_sheets[sheetname] = None
+ 
+        df = cached_sheets.get(sheetname)
+        if not df or any(c not in df.columns for c in [diff_col, pc_col, comm_col]): continue
+ 
+        df_casted = df.withColumn(diff_col, col(diff_col).cast("double")).withColumn(pc_col, col(pc_col).cast("double"))
+        fail_1 = F.abs(col(diff_col)) > 10_000_000
+        fail_2 = (F.abs(col(pc_col)) > 10) & (F.abs(col(diff_col)) >= 5_000_000)
+ 
+        df_casted = df_casted.withColumn("PassFailFlag",
+            F.when(col(diff_col).isNull() | isnan(col(diff_col)), "Not Applicable")
+             .when(fail_1 | fail_2, "Fail")
+             .otherwise("Pass")
+        )
+ 
+        formatted = df_casted.select(
+            F.lit(sheetname).alias("sheetname"),
+            F.lit(mappingtableid).alias("mappingtableid"),
+            col("fsli"),
+            F.lit(account).alias("account"),
+            col(diff_col).alias("difference"),
+            col(pc_col).alias("pc_change"),
+            col(comm_col).alias("commentary"),
+            col("PassFailFlag"),
+            F.when(
+                (col("PassFailFlag") == "Fail") &
+                (col(comm_col).isNotNull()) &
+                (~isnan(col(comm_col))) &
+                (~F.trim(col(comm_col)).isin("", "0", "0.0")),
+                "Pass"
+            ).otherwise("Fail").alias("Existence_Status"),
+            F.lit("").alias("Existence_Justification"),
+            F.lit(txn_id).alias("txnID"),
+            col("id").alias("odsid"),
+            col("id").alias("id")
+        )
+ 
+        final_dfs.append(formatted)
+ 
+    return reduce(DataFrame.unionByName, final_dfs) if final_dfs else None
+ 
+# Combine and write
+gn1811_df = process_gn1811()
+mapping_df = process_mapping_sheets()
+combined_df = reduce(DataFrame.unionByName, [df for df in [gn1811_df, mapping_df] if df is not None]) if gn1811_df or mapping_df else None
+ 
+if combined_df:
+    window = Window.orderBy(F.monotonically_increasing_id())
+    final_df = combined_df.withColumn("row_num", F.row_number().over(window)) \
+                          .withColumn("id", F.concat(F.lit("AI1_"), F.format_string("%06d", col("row_num")))) \
+                          .drop("row_num")
+ 
+    cols = ["id"] + [c for c in final_df.columns if c != "id"]
+    final_df.select(*cols).write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(final_output_path)
+    print(" Final output written successfully .")
+else:
+    print(" No valid data found to write.")
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # final all sheet + gn_18 [with try and logs]
  
  
