@@ -1,4 +1,13 @@
 
+final_df = final_df.withColumn(
+        "Existence_Justification",
+        F.when(
+            (col("PassFailFlag") == "Fail") & (col("Existence_Status") == "Fail"),
+            F.lit("Commentary was not provided")
+        ).otherwise(col("Existence_Justification"))
+    )
+
+
     header_row = 1
     final_header_col = None
     for col in range(1, col_ref_sheet.max_column + 1):
