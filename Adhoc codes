@@ -1,3 +1,30 @@
+
+    header_row = 1
+    final_header_col = None
+    for col in range(1, col_ref_sheet.max_column + 1):
+        header_val = col_ref_sheet.cell(row=header_row, column=col).value
+        if header_val and str(header_val).strip().lower() == "final_column_header":
+            final_header_col = col
+            break
+ 
+    # If found, clean each value under it
+    if final_header_col:
+        for row in range(2, col_ref_sheet.max_row + 1):
+            val = col_ref_sheet.cell(row=row, column=final_header_col).value
+            if val:
+                val = str(val)
+                val = re.sub(r"\(", "_", val)  
+                val = re.sub(r"\)", "", val)  
+                val = re.sub(r"_+", "_", val)  
+                val = val.strip("_ ")
+                col_ref_sheet.cell(row=row, column=final_header_col, value=val)
+
+
+
+
+
+
+
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.functions import col, isnan
 from pyspark.sql import Window
