@@ -1,4 +1,28 @@
 
+import fsspec
+from pathlib import Path
+
+# Connect to OneLake (Azure Data Lake / OneLake)
+fs = fsspec.filesystem(
+    "abfs",  # Azure Blob / ADLS filesystem
+    account_name="your_account_name",
+    account_key="your_account_key"  # or use SAS token / credentials
+)
+
+oneLake_folder = "your-container-name/path/to/folder"
+
+# Recursively find all CSV files
+csv_files = [
+    file for file in fs.find(oneLake_folder) if file.endswith(".csv")
+]
+
+# Print filenames only (without full path)
+for file_path in csv_files:
+    print(Path(file_path).name)
+
+
+
+
 # Python standard libraries
 import os, json, csv, glob, re, hashlib
 from math import ceil
