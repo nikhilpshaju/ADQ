@@ -1,4 +1,29 @@
 
+# Python standard libraries
+import os, json, csv, glob, re, hashlib
+from math import ceil
+from pathlib import Path
+from typing import List
+from functools import reduce
+
+# PySpark
+from pyspark.sql import SparkSession, DataFrame, Window
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col, lit, concat, trim, regexp_extract, when, abs, isnan, lower
+from pyspark.sql.types import StringType, DoubleType
+
+# Pandas / Excel (do not reinstall)
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+# OpenAI (make sure version is >=1.0.0)
+from openai import OpenAI  # or AzureOpenAI if using Azure
+
+
+
+
+
 import pandas as pd
 from pyspark.sql import SparkSession
 from openpyxl import load_workbook
