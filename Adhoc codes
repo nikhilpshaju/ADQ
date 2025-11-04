@@ -1,3 +1,25 @@
+
+# Create a writer and attach the workbook
+writer = pd.ExcelWriter(file_path, engine='openpyxl')
+writer.book = workbook
+writer.sheets = {ws.title: ws for ws in workbook.worksheets}
+
+# Example: write DataFrame starting at row 10, column 3 (zero-indexed → Excel row 11, column D)
+df.to_excel(
+    writer,
+    sheet_name=sheet_name,
+    startrow=10,
+    startcol=3,
+    index=False,
+    header=False
+)
+
+# Save changes
+writer.close()
+
+
+
+
 with pd.ExcelWriter(file_path, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
     writer.book = book
     writer.sheets = {ws.title: ws for ws in book.worksheets}
