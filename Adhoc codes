@@ -1,3 +1,23 @@
+with pd.ExcelWriter(file_path, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
+    writer.book = book
+    writer.sheets = {ws.title: ws for ws in book.worksheets}
+
+    # Write DataFrame to a specific sheet and start position
+    # startrow and startcol are zero-indexed
+    df.to_excel(
+        writer,
+        sheet_name="Sheet1",   # Existing sheet name
+        startrow=5,            # Write starting at row 6 (since 0-indexed)
+        startcol=2,            # Write starting at column C
+        index=False,
+        header=False           # Set to True if you want to include headers
+    )
+
+
+
+
+
+
 
 import fsspec
 from pathlib import Path
