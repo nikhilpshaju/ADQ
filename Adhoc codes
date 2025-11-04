@@ -1,4 +1,24 @@
 
+with pd.ExcelWriter(
+    file_path,
+    engine="openpyxl",
+    mode="a",                    # append mode (don’t overwrite)
+    if_sheet_exists="overlay"    # allows writing into existing sheet
+) as writer:
+    df.to_excel(
+        writer,
+        sheet_name=sheet_name,
+        startrow=startrow,       # choose where to start
+        startcol=0,              # or any specific column
+        index=False,
+        header=False
+    )
+
+
+
+
+
+
 # Create a writer and attach the workbook
 writer = pd.ExcelWriter(file_path, engine='openpyxl')
 writer.book = workbook
