@@ -1,4 +1,19 @@
 
+Assets,Total Non-current Assets,Total Current assets,Total Assets.,Equity and liabilities,Total Equity.,Liabilities,Total Non-current Liabilities,Total Current liabilities,Total Liabilities.,Total equity and liabilities.,SoFP Validation_Commentary,Operating Profit.,Profit before income tax.,Continuing Operations Income.,Profit for the year.,Profit/(loss) attributable to:,SoPL Validation_Commentary,Total Opening Balance,Movement during the period:,Closing Balance,Total Movement,Total Movement Changes,Validation,Total Movements,Total Movement ,Opening Balance,Total comprehensive income of the year,Items that will not be reclassified to profit or loss,Items that are or may be reclassified subsequently to profit or loss,Transactions with the Owner ,Closing balance as per Note,Validation - comparative period,Non-current ,GN 28 - Payable to project companies,GN 28 - Other Non-Current Liabilities,At period end,Current,GN 28 - Accounts payable due to third parties.,GN 28 - Accrued expenses,Related parties payables - current,GN 28 - Accounts payable due to related parties.,GN 28 - Retention payables.,Current Tax liabilities,As per SoFP,Non-current & Current total
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 with pd.ExcelWriter(
     file_path,
     engine="openpyxl",
