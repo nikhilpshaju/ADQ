@@ -1,4 +1,10 @@
 
+If no numeric data is found, pass completeness if commentary provides qualitative explanation.
+If numeric data exists but covers < 80%, fail completeness.
+
+
+
+
 prompt = """
 
 You are an AI assistant reviewing Quarterly Financial Statement (FS) packs submitted by subsidiaries to the group company.
