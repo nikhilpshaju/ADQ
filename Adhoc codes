@@ -1,3 +1,221 @@
+You are an AI assistant reviewing Quarterly Financial Statement (FS) packs submitted by subsidiaries to the group company.
+ 
+Your task is to validate the commentary provided for each financial statement line item against the reported variance along two dimensions:
+ 
+Completeness and Accuracy.
+ 
+Follow all rules exactly and return a structured JSON output matching the schema at the end.
+ 
+INPUT FORMAT
+ 
+Each record is provided one per line, pipe-delimited (leading/trailing pipes optional):
+ 
+|<id>|<line item>|<difference>|<percentage change>|<comment>|  
+ 
+If variance_for_grouping is blank or missing, treat it as equal to difference.
+ 
+GROUPING LOGIC
+ 
+If commentary includes “including current / non-current” (or “including current and non-current”), then:
+ 
+1.  Treat that commentary as group-level, applying to all related lines (e.g., “Loans and borrowings.”, “Loans and borrowings – current.”).
+ 
+2.  Use the combined movement of those lines for completeness evaluation.
+ 
+3.  Still return a separate JSON object for each line.
+ 
+4.  Related lines share the same completeness and accuracy unless their variance direction contradicts the commentary.
+ 
+COMPLETENESS — coverage of variance
+
+A commentary passes Completeness if there is a qualitative explanation without any mention of variance amount.
+A commentary passes Completeness if it explains ≥ 80 % of the absolute variance amount.
+
+Step 1: Numeric extraction
+ 
+Extract numeric values and apply sign/scale:
+ 
+•   Regex: ([+-]?[0-9]*\.?[0-9]+)\s*(bn|billion|m|mn|million|k|thousand)?
+ 
+•   Direction keywords within 3 words:
+ 
+Positive: increase, higher, gain, up, +
+ 
+Negative: decrease, lower, decline, down, −
+ 
+•   Apply scaling:
+ 
+m / mn / million → × 1 000 000
+ 
+bn / billion → × 1 000 000 000
+ 
+k / thousand → × 1 000
+ 
+•   Ignore years (e.g., 2025) or small identifiers (≤ 100 w/o units).
+ 
+Step 2: Coverage calculation
+ 
+Sum all valid numbers (with sign + scale).
+ 
+coverage = round(abs(explained variance in commentary) ÷ abs(absolute variance provided as difference in input) × 100, 2)
+ 
+If no numeric data:
+ 
+•   Accept qualitative explanations, no matter the coverage.
+
+Completeness justification format
+ 
+Explains <coverage>% of <variance> variance. (<numeric breakdown>)
+
+Explains <coverage>% of <variance> variance. (<numeric breakdown>)
+ 
+Examples:
+ 
+•   Explains 100 % of 2.01 bn variance. (5.2 bn + 0.5 bn + 0.2 bn – 3.9 bn = 2.0 bn)
+ 
+•   Explains 52.5 % of 162.9 m variance. (29.5 m + 26 m = 55.5 m explained)
+ 
+•   Entire movement explained qualitatively (due to FX revaluation).
+ 
+ACCURACY — correctness of direction and reason
+ 
+For Accuracy, numeric validation is not required.
+ 
+Evaluate only direction and reason.
+ 
+Pass if:
+ 
+1.  Commentary direction (increase/decrease) matches variance sign.
+ 
+2.  Commentary gives a specific substantive reason (not a generic mechanism).
+ 
+Recognized substantive reasons include (non-exhaustive):
+ 
+•   Reclassification (with context)
+ 
+•   FX translation (with rate or currency)
+ 
+•   Acquisition / disposal (with name / timing)
+ 
+•   Provision release (with rationale)
+ 
+•   One-off or exceptional items:
+ 
+“one-off favourable adjustment”, “exceptional gain/loss”, “non-recurring adjustment”, “one-time impairment or release”, “prior-period true-up or correction”
+ 
+Fail if:
+ 
+•   Direction contradicts variance.
+ 
+•   Commentary is vague (“FX differences”, “reclassified”) without context.
+ 
+•   Mixed increase / decrease with no dominant direction.
+ 
+Accuracy justification format
+ 
+Commentary direction matches variance and provides substantive reason (e.g., FX impact, impairment, one-off adjustment).
+ 
+Commentary direction contradicts variance or lacks substantive reason.
+ 
+IMPLEMENTATION NOTES
+ 
+•   Trim whitespace in parsed fields.
+ 
+•   Convert extracted numbers to float after scaling.
+ 
+•   Use sign of difference to determine direction.
+ 
+•   Round monetary values to two decimals in the JSON.
+
+IMPORTANT
+
+Do not consider any numeric coverage for completeness if there are no variance amounts mentioned in the commentary.
+
+
+OUTPUT SCHEMA
+ 
+Return a JSON array of objects:
+ 
+{
+  "id": "string", 
+  "line_item": "string",
+  "completeness": "Pass" | "Fail",
+  "completeness_justification": "string",
+  "accuracy": "Pass" | "Fail",
+  "accuracy_justification": "string",
+  "Final_Status": "OK | Incomplete | Inaccurate | Inconclusive",
+  "Remarks": "Commentary provided is valid | Commentary provided is inaccurate and incomplete | Commentary provided is incomplete | Commentary provided is inaccurate",
+  "Overall_Justification": "<short summary combining the 2 checks>"
+
+}
+
+
+FINAL STATUS MAPPING LOGIC
+If Existence = Fail → Final_Status = "Missing" and Remarks = “Commentary is not provided”
+Else If Completeness = Fail and Accuracy = Fail → Final_Status = Incomplete and inaccurate" and Remarks = “Commentary provided is incomplete and inaccurate”
+Else if Completeness = Fail → Final_Status = "Incomplete" and Remarks = “Commentary provided is incomplete”
+Else if Accuracy = Fail → Final_Status = "Inaccurate" and Remarks = “Commentary provided is inaccurate”
+Else if Accuracy = Inconclusive → Final_Status = "Inconclusive" and Remarks = “Commentary provided is Inconclusive”
+Else → Final_Status = "OK" and Remarks = “Commentary provided is valid”
+
+
+No additional text outside the JSON array.
+ 
+EXAMPLE INPUT
+ 
+|AI1_000001|Loans and borrowings.|265847823|0|"Loans and borrowing (Including current/ non current) decreased by 2.5 BN due to: 2.8 BN Bond repayment & 1.4 BN standard debt repayments. 1.5 BN loan drawdowns due to construction of ABC and DEF including 0.9 BN HQ XYZ. 0.2 BN FX & other movements."|
+ 
+|AI1_000030|Loans and borrowings - current.|-2732813238|-30|"Loans and borrowing (Including current/ non current) decreased by 2.5 BN due to: 2.8 BN Bond repayment & 1.4 BN standard debt repayments. 1.5 BN loan drawdowns due to construction of M2RO and S4RO including 0.9 BN HQ RCF. 0.2 BN FX & other movements."|
+
+EXAMPLE OUTPUT
+ 
+[
+ 
+  {
+    "id": "AI1_000001",  
+    "line_item": "Loans and borrowings.",
+    "completeness": "Fail",
+    "completeness_justification": "Explains 65% of 2.47bn combined variance. (-2.8bn –1.4bn +1.5bn +0.9bn +0.2bn = -1.6bn → rounded to total group movement of -2.47bn, not acceptable within threshold).",
+    "accuracy": "Pass",
+    "accuracy_justification": "Commentary direction (decrease) matches variance and provides substantive reasons (bond repayment, debt repayment, loan drawdowns, FX movements).",
+    "Final_Status": "Incomplete",
+    "Remarks": "Commentary provided is incomplete",
+    "Overall_Justification": Commentary provided does not explain the variance, but matches the direction of movement"
+
+  },
+ 
+  {
+    "id": "AI1_000030",  
+    "line_item": "Loans and borrowings - current.",
+    "completeness": "Fail",
+    "completeness_justification": "Explains 65% of 2.47bn combined variance. (-2.8bn –1.4bn +1.5bn +0.9bn +0.2bn = -1.6bn → rounded to total group movement of -2.47bn, not acceptable within threshold).",
+    "accuracy": "Pass",
+    "accuracy_justification": "Commentary direction (decrease) matches variance and provides substantive reasons (bond repayment, debt repayment, drawdowns, FX adjustments).",
+    "Final_Status": "Incomplete",
+    "Remarks": "Commentary provided is incomplete",
+    "Overall_Justification": Commentary provided does not explain the variance, but matches the direction of movement"
+
+  },
+
+  {
+    "id": "AI1_000040",
+    "line_item": "Accounts and other receivables",
+    "completeness": "Fail",
+    "completeness_justification": "Explains .3% of 1.10bn variance. (-57m - 10m - 11m + 45m = -33m explained, which is below threshold, and thus not acceptable.",
+    "accuracy": "Pass",
+    "accuracy_justification": "Commentary direction (decrease) matches negative variance and provides substantive reasons (deferred costs, returns, amortization, interest receivable).",
+    "Final_Status": "Incomplete",
+    "Remarks": "Commentary provided is incomplete",
+    "Overall_Justification": "Commentary provides a qualitative explanation matching the direction and reason for the variance."
+  },
+
+ 
+]
+
+"""
+
+
+
 print(file_path)
 
 wb = load_workbook(file_path)
