@@ -1,0 +1,57 @@
+import pandas as pd
+import re
+
+file_path = "SDM Report.xlsx"  
+df = pd.read_excel(file_path)
+df.columns = df.columns.str.lower()
+required_cols = ['template', 'entity', 'status (detailed)']
+for col in required_cols:
+    if col not in df.columns:
+        raise ValueError(f"âŒ Missing required column: '{col}'")
+
+df = df[df['entity'].notnull()]
+filtered_df_pp = df[df['status (detailed)'] =="With Preparer"] 
+filtered_df_app = df[df['status (detailed)'].str.contains(('With Approver'))]
+ 
+# Saving to the dataframe result
+result1 = filtered_df_pp[['template', 'status (detailed)']]
+result2 = filtered_df_app[['template', 'status (detailed)']]
+
+result1 = pd.concat([result1,result2], ignore_index= True)
+ 
+print(result1)
+
+
+
+import pandas as pd
+import re
+
+# Read Excel file
+file_path = "TaskManager.xlsx"  
+df = pd.read_excel(file_path)
+df.columns = df.columns.str.lower()
+required_cols = ['name', 'taskid', 'status']
+for col in required_cols:
+    if col not in df.columns:
+        raise ValueError(f"Missing required column: '{col}'")
+
+# Extract entity number from TaskID
+pattern = r'_(\d{4})'
+df['entity_number'] = df['taskid'].astype(str).apply(
+    lambda x: re.search(pattern, x).group(1) if re.search(pattern, x) else None
+)
+
+#  Keep only rows with valid entity number
+df = df[df['entity_number'].notnull()]
+
+# Filtering with Open or Pending status
+filtered_df = df[df['status'].str.lower().isin(['open', 'pending'])]
+
+# Saving to the dataframe result
+result = filtered_df[['name', 'status']]
+if result.empty:
+    print("No rows found with valid entity number and Open/Pending status.")
+else:
+    print("Filtered rows:")
+    print(result)
+   
