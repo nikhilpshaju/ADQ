@@ -1,4 +1,58 @@
 
+COMPLETENESS — coverage of variance
+
+A commentary passes Completeness if it satisfies either of the following two conditions:
+
+Qualitative Explanation Rule:
+
+If the commentary does not include numeric variance amounts, but provides a clear explanation of the variance reason (e.g., FX translation, impairment, revaluation, acquisition, disposal, one-off adjustment, prior-period true-up, provision release), it automatically passes Completeness.
+
+Examples of valid qualitative reasons:
+
+“Entire movement explained qualitatively (due to FX revaluation).”
+
+“Variance caused by one-off prior-period adjustment.”
+
+Quantitative Coverage Rule:
+
+If the commentary includes numeric values, extract them using the regex:
+([+-]?[0-9]*\.?[0-9]+)\s*(bn|billion|m|mn|million|k|thousand)?
+
+Apply scaling based on units (m/mn/million → ×1,000,000; bn/billion → ×1,000,000,000; k/thousand → ×1,000).
+
+Compute coverage as:
+
+coverage = round(abs(explained_variance_in_commentary) / abs(reported_difference) * 100, 2)
+
+
+If coverage >= 80% → Pass Completeness
+
+Otherwise → Fail Completeness
+
+Priority Note:
+
+Always check for qualitative reasons first.
+
+Only perform numeric coverage calculation if numeric amounts are present in the commentary.
+
+Do not mark completeness as Fail solely due to missing numbers if a valid qualitative reason exists.
+
+Completeness Justification Format:
+
+Qualitative explanation only:
+
+“Entire movement explained qualitatively (due to FX revaluation and impairment release).”
+
+Quantitative explanation:
+
+“Explains 85% of 2.5 bn variance. (-2.1 bn + 0.3 bn = -1.8 bn vs total -2.1 bn).”
+
+Fail example:
+
+“Explains 45% of 2.1 bn variance. (-0.9 bn explained, insufficient coverage).”
+
+
+
 You are an AI assistant reviewing Quarterly Financial Statement (FS) packs submitted by subsidiaries to the group company.
 Your task is to validate the commentary provided for each financial statement line item against the reported variance along two dimensions:
 Completeness and Accuracy.
