@@ -1,4 +1,401 @@
 
+print(file_path)
+
+wb = load_workbook(file_path)
+
+# Sheets to process
+sheets_to_process = [s for s in wb.sheetnames if s.lower().startswith("output - rule") or s.lower().startswith("output - sdm & tm")]
+print(sheets_to_process)
+
+# Styles
+header_fill = PatternFill(start_color="151B54", end_color="151B54", fill_type="solid")
+header_font = Font(bold=True, color="FFFFFF")
+pattern_fill = PatternFill(start_color="ECECEC", end_color="ECECEC", fill_type="solid")
+pattern_font = Font(bold=True, color="000000")
+green_fill = PatternFill(start_color="93DC5C", end_color="93DC5C", fill_type="solid")
+red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+soft_delete_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+soft_delete_font = Font(color="FFFFFF", italic=True)
+thin_border = Border(
+    left=Side(style="thin"),
+    right=Side(style="thin"),
+    top=Side(style="thin"),
+    bottom=Side(style="thin")
+)
+def apply_sdm_tm_format(ws):
+    print(f"Applying SDM/TM block: {ws.title}")
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    phrase = [
+        "all forms have been completed for the entity",
+        "all tasks have been completed for the entity",
+        "sdm file not found in sharepoint",
+        "task manager file not found in sharepoint"
+    ]
+    row=1
+    while row <= max_row:
+        
+        cell_b = ws.cell(row=row, column=2)  # column B
+        val = cell_b.value
+        if val and isinstance(val, str):
+            clean=val.strip().lower()
+
+            if any(p in clean for p in phrase):
+                #Applying bold only
+                cell_b.font = Font(bold=True)
+                row += 1
+                print("made it bold only")
+                continue
+
+        if val and isinstance(val, str) and val.strip().lower().startswith("below"):             
+                cell_b.font = Font(bold=True)
+                header_row_idx = row + 1
+                while header_row_idx <= max_row and (ws.cell(row=header_row_idx, column=1).value is None and ws.cell(row=header_row_idx, column=2).value is None):
+                    header_row_idx += 1
+
+                if header_row_idx <= max_row:
+                    for c in range(1, max_col + 1):
+                        hcell = ws.cell(row=header_row_idx, column=c)
+                        if hcell.value is not None and str(hcell.value).strip() != "":
+                            hcell.fill = header_fill
+                            hcell.font = header_font
+                            hcell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+                    # applying table borders to rows after header 
+                    data_row = header_row_idx + 1
+                    while data_row <= max_row:
+                        b_val = ws.cell(row=data_row, column=2).value
+                        row_blank = all((ws.cell(row=data_row, column=col).value is None or str(ws.cell(row=data_row, column=col).value).strip() == "") for col in range(1, max_col + 1))
+                        if (b_val and isinstance(b_val, str) and b_val.strip().lower().startswith("below")) or row_blank:
+                            break
+
+                        for c in range(2, max_col + 1):
+                            dcell = ws.cell(row=data_row, column=c)
+                            dcell.border = Border(left=Side(style="thin"), right=Side(style="thin"),
+                                                top=Side(style="thin"), bottom=Side(style="thin"))
+                            dcell.alignment = Alignment(wrap_text=True, vertical="top")
+                        data_row += 1
+                    row = data_row
+                    continue            
+        row += 1
+
+    print(f"Completed SDM/TM formatting on {ws.title}")
+
+sr_regex = re.compile(r"\bsr\.?\s*no\.?\b", re.I)
+
+
+def normalize_header_text(s):
+    return re.sub(r"[^A-Za-z0-9]", "", str(s or "")).lower()
+
+def soft_delete_cell(cell):
+    cell.fill = soft_delete_fill
+    cell.font = soft_delete_font
+    cell.value = ""
+
+for sheet_name in sheets_to_process:
+    ws = wb[sheet_name]
+    print(f"Processing sheet: {ws.title}")
+
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 70
+    ws.sheet_properties.tabColor = "081F59"
+
+
+    # Finding last used row and column
+    last_row = 0
+    last_col = 0
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value not in (None, ""):
+                last_row = max(last_row, cell.row)
+                last_col = max(last_col, cell.column)
+
+    # Hide unused columns
+    for col in range(last_col + 1, ws.max_column + 1):
+        ws.column_dimensions[get_column_letter(col)].hidden = True
+    # Hide unused rows
+    for r in range(last_row + 1, ws.max_row + 1):
+        ws.row_dimensions[r].hidden = True
+
+    try:
+        for r in [2, 3, 4]:
+            if r <= ws.max_row:
+                for cell in ws[r]:
+                    cell.font = Font(bold=True, size=18)
+        if 6 <= ws.max_row:
+            for cell in ws[6]:
+                cell.font = Font(bold=True)
+        if 8 <= ws.max_row:
+            for cell in ws[8]:
+                cell.font = Font(bold=True)       
+    except Exception as e:
+        print(f"Row-formatting skipped for {sheet_name}: {e}")
+
+    if "output - sdm" in sheet_name.lower():
+        apply_sdm_tm_format(ws)
+
+    # Row scanning
+    row = 1
+    while row <= last_row:
+        raw_texts = [str(c.value).strip() if c.value else "" for c in ws[row]]
+        header_norms = [normalize_header_text(txt) for txt in raw_texts]
+
+        # Detect SR No row
+        sr_col_idx = next((idx for idx, txt in enumerate(raw_texts) if txt and sr_regex.search(txt)), None)
+        if sr_col_idx is not None:
+            pattern_row_idx = row - 1
+
+            # Identify helper columns
+            helper_cols = {name: header_norms.index(name) for name in ["rownumber", "cellnumber", "sheetname"] if name in header_norms}
+
+            # Pattern row formatting
+            first_helper_col = min(helper_cols.values()) if helper_cols else len(header_norms)
+            for idx, cell in enumerate(ws[pattern_row_idx][1:], start=1):
+                if idx >= first_helper_col:
+                    break
+                cell.fill = pattern_fill
+                cell.font = pattern_font
+                left = Side(style="medium") if idx == 1 else Side(style=None)
+                right = Side(style="medium") if idx == first_helper_col - 1 else Side(style=None)
+                cell.border = Border(top=Side(style="medium"), bottom=Side(style="medium"), left=left, right=right)
+
+            # Header row formatting
+            for idx, cell in enumerate(ws[row][1:], start=1):
+                if idx in helper_cols.values():
+                    continue
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = thin_border
+
+            # Soft-delete helper header cells
+            for helper_col in helper_cols.values():
+                if helper_col < len(ws[row]):
+                    soft_delete_cell(ws[row][helper_col])
+
+            # Hyperlink-related columns
+            link_col_index = helper_cols.get("rownumber") or helper_cols.get("cellnumber")
+            header_type = "rownumber" if "rownumber" in helper_cols else "cellnumber" if "cellnumber" in helper_cols else None
+            sheetname_col_index = helper_cols.get("sheetname")
+
+            # Identify target columns based on sheet
+            notename_col_idx = header_norms.index("notename") if "notename" in header_norms else None
+            desc_col_idx = header_norms.index("notenamedescription") if "notenamedescription" in header_norms else None
+            account_col_idx = header_norms.index("accountname") if "accountname" in header_norms else None
+            remarks_col_idx = header_norms.index("remarks") if "remarks" in header_norms else None
+
+            # TB Value and Amount column indexes
+            tb_value_idx = header_norms.index("tbvalue") if "tbvalue" in header_norms else None
+            amount_idx = header_norms.index("amount") if "amount" in header_norms else None
+
+            # Define target columns for hyperlinks based on sheet name
+            if "output - rule 1" in sheet_name.lower():
+                target_columns = [idx for idx in [desc_col_idx] if idx is not None]
+            elif "output - rule 2" in sheet_name.lower():
+                target_columns = [idx for idx in [account_col_idx, notename_col_idx] if idx is not None]
+            elif "output - rule 3" in sheet_name.lower():
+                target_columns = [idx for idx in [account_col_idx, notename_col_idx] if idx is not None]
+            elif "output - rule 4" in sheet_name.lower():
+                target_columns = [idx for idx in [notename_col_idx] if idx is not None]
+
+                remarks_link_target_sheet = "Output - Rule 4.1"
+            else:
+                target_columns = []
+
+            # Process data rows
+            data_idx = row + 1
+            while data_idx <= last_row:
+                data_row = ws[data_idx]
+                if all((c.value is None or str(c.value).strip() == "") for c in data_row):
+                    break
+
+                # Add borders
+                for idx, c in enumerate(data_row[1:], start=1):
+                    if idx not in helper_cols.values():
+                        c.border = thin_border
+
+                # Conditional formatting
+                header_texts = [normalize_header_text(c.value) for c in ws[row]]
+                cp_idx = header_texts.index("currentperiod") if "currentperiod" in header_texts else None
+                vs_idx = header_texts.index("validationstatus") if "validationstatus" in header_texts else None
+
+                for idx in [cp_idx, vs_idx]:
+                    if idx is not None and data_row[idx].value:
+                        val = str(data_row[idx].value).strip().lower()
+                        if val in ["pass", "tb validated"]:
+                            data_row[idx].fill = green_fill
+                        elif val == "fail":
+                            data_row[idx].fill = red_fill
+
+                # --- TB VALUE / AMOUNT FORMATTING ---
+                for fmt_idx in [tb_value_idx, amount_idx]:
+                    if fmt_idx is not None and fmt_idx < len(data_row):
+                        cell = data_row[fmt_idx]
+                        if isinstance(cell.value, (int, float)):
+                            cell.number_format = '#,##0_);(#,##0);'
+
+                # --- HYPERLINK LOGIC (conditional per sheet) ---
+                if link_col_index is not None and sheetname_col_index is not None:
+                    link_cell_value = ws.cell(row=data_idx, column=link_col_index + 1).value
+                    sheetname_value = ws.cell(row=data_idx, column=sheetname_col_index + 1).value
+
+                    if link_cell_value and sheetname_value:
+                        safe_sheet_name = str(sheetname_value).strip()
+                        if any(ch in safe_sheet_name for ch in [" ", "-", "."]):
+                            safe_sheet_name = f"'{safe_sheet_name}'"
+
+                        try:
+                            if header_type == "rownumber":
+                                target_number = int(link_cell_value)
+                                target_ref = f"{safe_sheet_name}!A{target_number}:Z{target_number}"
+                            elif header_type == "cellnumber":
+                                target_ref = f"{safe_sheet_name}!{str(link_cell_value).upper().strip()}"
+                            else:
+                                target_ref = None
+
+                            if target_ref:
+                                for idx in target_columns:
+                                    link_target_cell = data_row[idx]
+                                    if link_target_cell and link_target_cell.value:
+                                        link_target_cell.hyperlink = f"#{target_ref}"
+                                        link_target_cell.font = Font(color="0000FF", underline="single")
+                                        # print(f"{sheet_name}: Linked '{link_target_cell.value}' aÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ {target_ref}")
+                        except ValueError:
+                            pass
+                # Hyperlink for Rule 4 Remarks column
+                if sheet_name.strip().lower() == "output - rule 4" and remarks_col_idx is not None:
+                    if 'Output - Rule 4.1' in wb.sheetnames:
+                        try:
+                            current_row_number = data_idx  # current row 
+                            remarks_cell = data_row[remarks_col_idx]
+                            if remarks_cell and remarks_cell.value:
+                                target_ref = f"'{remarks_link_target_sheet}'!A{current_row_number}:Z{current_row_number}"
+                                remarks_cell.hyperlink = f"#{target_ref}"
+                                remarks_cell.font = Font(color="0000FF", underline="single")
+                                # print(f"{sheet_name}: Linked Remarks (Row {current_row_number}) Ã¢â€ â€™ {target_ref}")
+                        except Exception as e:
+                            print(f"{sheet_name}: Failed to link Remarks at row {data_idx} Ã¢â€ â€™ {e}")
+                
+                # Soft-delete helper columns
+                for helper_col in helper_cols.values():
+                    if helper_col < len(data_row):
+                        soft_delete_cell(data_row[helper_col])
+
+                data_idx += 1
+
+            row = data_idx + 1
+            continue
+        row += 1
+    
+    # Autofit columns
+    for col in ws.columns:
+        try:
+            max_length = 0
+            col_letter = get_column_letter(col[0].column)
+            for cell in col:
+                if cell.value is not None:
+                    max_length = max(max_length, len(str(cell.value)) + 4) # for changing column width
+            ws.column_dimensions[col_letter].width = max(1, max_length)
+        except Exception:
+            pass
+
+    try:
+        
+        ws.column_dimensions["A"].width = 2
+        if ws.title != "Output - SDM & TM":
+            ws.column_dimensions["B"].width = 6
+    except Exception:
+        pass
+
+    if sheet_name.strip().lower() == "output - rule 4.1":
+        print("Applying formatting to Output - Rule 4.1")
+
+        # Adjust column widths
+        col_widths = {
+            "C": 10,
+            "D": 25,  
+            "E": 28,
+            "F": 25,
+            "G": 15,
+            "H": 28,  
+            "I": 15,
+            "J": 28,
+            "K": 15,
+            "L": 28,
+            "M": 28,
+            "N": 28,
+        }
+        skip_rows = [2,3,4,6,8]
+        for col_letter, width in col_widths.items():
+            ws.column_dimensions[col_letter].width = width
+        # Text wrapping 
+        for row in ws.iter_rows():
+            for cell in row:
+                row_num = row[0].row        
+                if row_num not in skip_rows:
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+# Custom deletions
+custom_deletions = {
+    "Output - Rule 1": ["G","H"],
+    "Output - Rule 2": ["I", "J"],
+    "Output - Rule 3": ["I", "J"],
+    #"Output - Rule 4": ["H", "I"],
+
+}
+for sheet_name, cols in custom_deletions.items():
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        col_nums = sorted([column_index_from_string(c) for c in cols], reverse=True)
+        for col_idx in col_nums:
+            try:
+                ws.delete_cols(col_idx)
+                print(f"{sheet_name}: Deleted custom column {col_idx}")
+            except Exception as e:
+                print(f"{sheet_name}: Failed to delete column {col_idx}: {e}")
+
+print("Applied successfully.")
+wb.save(file_path)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 COMPLETENESS — coverage of variance
 
 A commentary passes Completeness if it satisfies either of the following two conditions:
