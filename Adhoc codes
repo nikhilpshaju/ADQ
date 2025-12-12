@@ -1,3 +1,15 @@
+FSLI CY LY Difference % Difference Comment Depreciation and amortisation. 3079241590 3042253437 36988152.8699994 -1% AED 205m is related to the amortization of non-IC ROU assets (Taweelah RO, Vehicles and TFP). Increase in depreciation and amortization during the year mainly due to the addition of Taweelah RO Desalination Plant (it was only added March 2024 in prior period) along with the increase in asset value due to indexation performed during the year. 
+
+Analyze the data and come up with an insight on the completeness of the commentary based on the explanation provided for the variance. Provide pass/fail based on the coverage of the commentary. If the commentary covers 80-120% of the variance or provides a qualitative explanation of the variance, then pass the commentary, otherwise fail the commentary. Please note that variance provided is no intercompany variance whereas the CY and PY values will include the intercompany amounts as well. If the commentary mentions anything about closing balance, you need to ignore those comments and then validate the commentary against the variance accordingly.
+
+
+
+
+
+
+
+
+
 1. Use the variance provided as the basis for assessment.
 2. Ignore any references to closing balances in the commentary.
 3. Commentary receives a PASS if:
