@@ -1,3 +1,11 @@
+1. Use the variance provided as the basis for assessment.
+2. Ignore any references to closing balances in the commentary.
+3. Commentary receives a PASS if:
+
+   a) It explains 80–120% of the variance quantitatively, OR
+   b) It provides a clear qualitative explanation of the variance drivers (e.g., asset additions, indexation, timing differences, disposals).
+4. Otherwise, assign FAIL.
+
 Analyze the data and come up with an insight on the completeness of the commentary based on the explanation provided for the variance. Provide pass/fail based on the coverage of the commentary. If the commentary covers 80-120% of the variance or provides a qualitative explanation of the variance, then pass the commentary, otherwise fail the commentary. Please note that variance provided is no intercompany variance whereas the CY and PY values will include the intercompany amounts as well. If the commentary mentions anything about closing balance, you need to ignore those comments and then validate the commentary against the variance accordingly.
 
 
