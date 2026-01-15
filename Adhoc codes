@@ -1,3 +1,21 @@
+https://addhc.sharepoint.com/:l:/r/sites/FinancialConsolidation-External/Lists/BoostMS2RunStatus_Test?e=3%3a6a2df7ad40a44e90a9a233c9405edd79&sharingv2=true&fromShare=true&at=9 - MS1 Test
+
+
+https://addhc.sharepoint.com/sites/FinancialConsolidation-External/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2FFinancialConsolidation%2DExternal%2FShared%20Documents%2FADQ%20Consolidation%202020%2F2025%2FBoost%202%2E0%2FTesting&viewid=daf9782d%2D65bd%2D42a4%2D9595%2Df430f12c11cd&e=5%3A3daa1df28d8f407882fe92733b966690&sharingv2=true&fromShare=true&at=9&CID=89a17d93%2Dff9a%2D4d6f%2Db210%2D9a9ab2942e72&FolderCTID=0x012000F2DA8689AB233D4E9C53841ED4F0300B - SharePoint Folder link
+
+https://addhc.sharepoint.com/:l:/r/sites/FinancialConsolidation-External/Lists/BoostMS2RunStatus_Test?e=3%3a6a2df7ad40a44e90a9a233c9405edd79&sharingv2=true&fromShare=true&at=9 - MS2 Test
+
+https://addhc.sharepoint.com/sites/FinancialConsolidation-External/Lists/BoostMS2RunStatus_Dev/AllItems.aspx - MS2 Dev
+
+https://addhc.sharepoint.com/:l:/r/sites/FinancialConsolidation-External/Lists/BoostConfig_Dev?e=MFW5ZK - Config Dev
+
+https://addhc.sharepoint.com/:l:/r/sites/FinancialConsolidation-External/Lists/BoostConfig_Test?e=3%3a2e8299c50a244dcfb3739fa3f6555876&sharingv2=true&fromShare=true&at=9 - Config Test
+
+
+
+
+
+
 FSLI CY LY Difference % Difference Comment Depreciation and amortisation. 3079241590 3042253437 36988152.8699994 -1% AED 205m is related to the amortization of non-IC ROU assets (Taweelah RO, Vehicles and TFP). Increase in depreciation and amortization during the year mainly due to the addition of Taweelah RO Desalination Plant (it was only added March 2024 in prior period) along with the increase in asset value due to indexation performed during the year. 
 
 Analyze the data and come up with an insight on the completeness of the commentary based on the explanation provided for the variance. Provide pass/fail based on the coverage of the commentary. If the commentary covers 80-120% of the variance or provides a qualitative explanation of the variance, then pass the commentary, otherwise fail the commentary. Please note that variance provided is no intercompany variance whereas the CY and PY values will include the intercompany amounts as well. If the commentary mentions anything about closing balance, you need to ignore those comments and then validate the commentary against the variance accordingly.
